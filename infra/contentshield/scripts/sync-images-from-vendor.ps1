@@ -7,7 +7,7 @@
 .DESCRIPTION
   Uses `az acr import --username/--password` to copy each repo:tag from
   <vendorAcrFqdn> into <targetAcrName>. The transfer is blob-to-blob inside
-  Azure — no local docker/disk needed, takes seconds.
+  Azure — no local docker/disk needed, takes seconds. -a
 
   Each image is imported with the requested tag AND tagged as ':latest'.
 
@@ -46,13 +46,22 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Helper: list tags in a remote ACR repo via the Docker Registry v2 API using the scoped token.
+# Helper: list tags in a remote ACR repo via the Docker Registry v2 API using
+# the scoped token. ACR's data-plane requires a two-step Basic -> Bearer token
+# exchange before /v2/<repo>/tags/list works.
 function Get-RemoteTags {
     param([string]$Fqdn, [string]$Repo, [string]$Username, [string]$Password)
     $basic = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${Username}:${Password}"))
-    $headers = @{ Authorization = "Basic $basic" }
     try {
-        $resp = Invoke-RestMethod -Uri "https://$Fqdn/v2/$Repo/tags/list" -Headers $headers -Method GET -ErrorAction Stop
+        # Step 1: exchange Basic creds for a short-lived Bearer access token scoped to metadata_read
+        $tokenResp = Invoke-RestMethod -Method GET `
+            -Uri "https://$Fqdn/oauth2/token?service=$Fqdn&scope=repository:${Repo}:metadata_read" `
+            -Headers @{ Authorization = "Basic $basic" } -ErrorAction Stop
+        if (-not $tokenResp.access_token) { throw "Token exchange returned no access_token." }
+        # Step 2: list tags using the Bearer access token
+        $resp = Invoke-RestMethod -Method GET `
+            -Uri "https://$Fqdn/v2/$Repo/tags/list" `
+            -Headers @{ Authorization = "Bearer $($tokenResp.access_token)" } -ErrorAction Stop
     } catch {
         throw "Could not list tags for $Fqdn/$Repo. The scoped token must have 'metadata/read' on the repo. ($_)"
     }
@@ -67,11 +76,14 @@ Write-Host "`nImporting images from $VendorAcrFqdn -> $TargetAcrName.azurecr.io"
 function Get-NewestTag {
     param([string]$Fqdn, [string]$Repo, [string]$Username, [string]$Password)
     $basic = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${Username}:${Password}"))
-    $headers = @{ Authorization = "Basic $basic" }
     try {
+        # Same Basic -> Bearer exchange, then use the ACR-specific time-ordered tags endpoint
+        $tokenResp = Invoke-RestMethod -Method GET `
+            -Uri "https://$Fqdn/oauth2/token?service=$Fqdn&scope=repository:${Repo}:metadata_read" `
+            -Headers @{ Authorization = "Basic $basic" } -ErrorAction Stop
         $resp = Invoke-RestMethod -Method GET `
             -Uri "https://$Fqdn/acr/v1/$Repo/_tags?orderby=timedesc&n=1" `
-            -Headers $headers -ErrorAction Stop
+            -Headers @{ Authorization = "Bearer $($tokenResp.access_token)" } -ErrorAction Stop
         if ($resp.tags -and $resp.tags.Count -gt 0) { return $resp.tags[0].name }
     } catch {
         Write-Host "  (Could not fetch newest tag for $Repo : $($_.Exception.Message))" -ForegroundColor DarkYellow
