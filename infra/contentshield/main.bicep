@@ -183,6 +183,15 @@ param apimPublisherName string = 'ratio'
 @description('Deploy API Management. Slow (~30-45 min). Set false to skip during iterative testing.')
 param deployApim bool = true
 
+@description('AAD tenant id stamped into APIM named values (used by validate-azure-ad-token policy). Defaults to the tenant the deployment is running in.')
+param aadTenantId string = subscription().tenantId
+
+@description('AAD audience that the APIM policy validates incoming bearer tokens against. Defaults to ratioAiDevClientId — set to the API app registration client id for production.')
+param aadApiAudience string = ''
+
+@description('AAD client (application) id of the API. Stored as an APIM named value. Defaults to ratioAiDevClientId.')
+param aadApiClientId string = ''
+
 // ── App registration (RatioAIDev) ───────────────────────────────────────────
 
 @description('Client (Application) ID of the Entra app registration RatioAIDev. Exposed to container apps as RATIO_AI_DEV_CLIENT_ID.')
@@ -327,6 +336,13 @@ module apim 'modules/apim.bicep' = if (deployApim) {
     publisherEmail: apimPublisherEmail
     publisherName: apimPublisherName
     subnetId: network.outputs.apimSubnetId
+    caeDefaultDomain: cae.outputs.defaultDomain
+    backendAppName: appName
+    aadTenantId: aadTenantId
+    aadApiAudience: empty(aadApiAudience) ? ratioAiDevClientId : aadApiAudience
+    aadApiClientId: empty(aadApiClientId) ? ratioAiDevClientId : aadApiClientId
+    appInsightsId: monitoring.outputs.appInsightsId
+    appInsightsInstrumentationKey: monitoring.outputs.appInsightsInstrumentationKey
   }
 }
 
