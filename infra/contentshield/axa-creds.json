@@ -1,0 +1,10 @@
+{
+  "vendorAcrFqdn": "contentshieldacr.azurecr.io",
+  "vendorAcrTokenName": "pull-axa",
+  "vendorAcrTokenPassword": "363tSVcoHqxQqZz4W6gx24cfjh32WbkFdnuXCIbwCrK644E0IXV8JQQJ99CEACMsfrFEqg7NAAABAZCRxkqF",
+  "expiresUtc": "2026-06-11T23:33:20Z",
+  "repositories": [
+    "contentshield",
+    "contentshield-stage2"
+  ]
+}
