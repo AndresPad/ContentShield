@@ -12,6 +12,8 @@ param acrLoginServer string
 param acrResourceId string
 param appInsightsConnectionString string
 param contentSafetyEndpoint string
+@description('Content Safety account resource id — used to grant the main app MI Cognitive Services User on that account.')
+param contentSafetyResourceId string
 param ratioAiDevClientId string
 
 // Main app
@@ -27,8 +29,27 @@ param extraStage2AllowedIps array = []
 param slmModel string = 'google/gemma-4-31b-it'
 @description('Feature flag CONTENTSHIELD_V1_ML_DISABLED on the main app. Set to "0" to re-enable the legacy ML path.')
 param contentshieldV1MlDisabled string = '1'
-@description('Optional cache-buster injected as REDEPLOY_TS env var. Bump to force a new container app revision even when no other property changes.')
-param redeployTimestamp string = ''
+
+@description('Minimum replicas for the main app. Keep ≥1 to avoid scale-to-zero cold starts.')
+@minValue(0)
+@maxValue(10)
+param appMinReplicas int = 1
+
+@description('Minimum replicas for the stage-2 GPU app. Keep ≥1 to keep a GPU node warm and avoid 5-15 min cold starts on a new replica.')
+@minValue(0)
+@maxValue(5)
+param stage2MinReplicas int = 1
+
+@description('Maximum replicas for the stage-2 GPU app.')
+@minValue(1)
+@maxValue(10)
+param stage2MaxReplicas int = 3
+
+// Deterministic revision suffix derived from the image reference. Revisions
+// only roll when the image string actually changes — no more revision churn
+// on infra-only deploys (which is what REDEPLOY_TS used to force).
+var appRevisionSuffix = 'r${take(uniqueString(appImage), 8)}'
+var stage2RevisionSuffix = 'r${take(uniqueString(stage2Image), 8)}'
 
 // Stage 2 (GPU)
 param deployStage2 bool
@@ -46,6 +67,11 @@ param hfCacheShareName string = 'hfcache'
 
 resource cae 'Microsoft.App/managedEnvironments@2024-10-02-preview' existing = {
   name: caeName
+}
+
+// Reference the Content Safety account by id segments so we can scope a role assignment on it.
+resource contentSafety 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = {
+  name: last(split(contentSafetyResourceId, '/'))
 }
 
 // Grant the CAE's system-assigned MI AcrPull on the ACR so apps can use
@@ -102,6 +128,7 @@ resource app 'Microsoft.App/containerApps@2024-10-02-preview' = {
       maxInactiveRevisions: 100
     }
     template: {
+      revisionSuffix: appRevisionSuffix
       containers: [
         {
           name: appName
@@ -148,12 +175,7 @@ resource app 'Microsoft.App/containerApps@2024-10-02-preview' = {
               name: 'RATIO_AI_DEV_CLIENT_ID'
               value: ratioAiDevClientId
             }
-          ], empty(redeployTimestamp) ? [] : [
-            {
-              name: 'REDEPLOY_TS'
-              value: redeployTimestamp
-            }
-          ])
+          ], [])
           probes: [
             {
               type: 'Liveness'
@@ -198,7 +220,7 @@ resource app 'Microsoft.App/containerApps@2024-10-02-preview' = {
         }
       ]
       scale: {
-        minReplicas: 1
+        minReplicas: appMinReplicas
         maxReplicas: 1
         cooldownPeriod: 300
         pollingInterval: 30
@@ -220,7 +242,19 @@ resource app 'Microsoft.App/containerApps@2024-10-02-preview' = {
   ]
 }
 
-// ── Stage 2 (GPU) ───────────────────────────────────────────────────────────
+// Grant the main app's system-assigned managed identity 'Cognitive Services User'
+// on the Content Safety account so it can call the endpoint with AAD auth
+// (Content Safety is deployed with disableLocalAuth=true, so API keys do not work).
+var cogServicesUserRoleId = 'a97b65f3-24c7-4388-baec-2e87135dc908'
+resource csUserForApp 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(contentSafetyResourceId, appName, cogServicesUserRoleId)
+  scope: contentSafety
+  properties: {
+    principalId: app.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', cogServicesUserRoleId)
+  }
+}
 
 var stage2Secrets = empty(hfToken) ? [] : [
   {
@@ -268,12 +302,7 @@ var stage2EnvBase = concat([
     name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
     value: appInsightsConnectionString
   }
-], empty(redeployTimestamp) ? [] : [
-  {
-    name: 'REDEPLOY_TS'
-    value: redeployTimestamp
-  }
-])
+], [])
 
 var stage2EnvWithHf = empty(hfToken) ? stage2EnvBase : concat([
   {
@@ -354,6 +383,7 @@ resource stage2 'Microsoft.App/containerApps@2024-10-02-preview' = if (deploySta
       maxInactiveRevisions: 100
     }
     template: {
+      revisionSuffix: stage2RevisionSuffix
       containers: [
         {
           name: stage2AppName
@@ -393,17 +423,17 @@ resource stage2 'Microsoft.App/containerApps@2024-10-02-preview' = if (deploySta
               periodSeconds: 1
               timeoutSeconds: 3
               successThreshold: 1
-              failureThreshold: 240
+              failureThreshold: 600
             }
           ]
           volumeMounts: stage2VolumeMounts
         }
       ]
       scale: {
-        minReplicas: 1
-        maxReplicas: 3
-        cooldownPeriod: 300
-        pollingInterval: 30
+        minReplicas: stage2MinReplicas
+        maxReplicas: stage2MaxReplicas
+        cooldownPeriod: 600
+        pollingInterval: 15
         rules: [
           {
             name: 'http-scaler'
@@ -416,6 +446,7 @@ resource stage2 'Microsoft.App/containerApps@2024-10-02-preview' = if (deploySta
         ]
       }
       volumes: stage2Volumes
+      terminationGracePeriodSeconds: 60
     }
   }
   dependsOn: [

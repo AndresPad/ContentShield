@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="Layer_2" data-name="Layer 2" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 128 154.43">
+  <defs>
+    <style>
+      .cls-1 {
+        fill: url(#linear-gradient-2);
+      }
+
+      .cls-2 {
+        fill: url(#linear-gradient);
+      }
+    </style>
+    <linearGradient id="linear-gradient" x1="0" y1="34.52" x2="115.73" y2="34.52" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00045d"/>
+      <stop offset=".37" stop-color="#0580c5"/>
+      <stop offset=".65" stop-color="#4cb4df"/>
+      <stop offset="1" stop-color="#71cbef"/>
+    </linearGradient>
+    <linearGradient id="linear-gradient-2" x1="130.27" y1="45.47" x2="34.12" y2="169.67" xlink:href="#linear-gradient"/>
+  </defs>
+  <g id="RATIO_Winner_Concepts" data-name="RATIO Winner Concepts">
+    <g id="Layer_234" data-name="Layer 234">
+      <path class="cls-2" d="M111.3,69.04c2.83-6.15,4.43-12.95,4.43-20.08C115.73,22.03,93.7,0,66.77,0H0c0,39.98,7,35.98,35.61,35.61h16.63c2.96,0,7.52-.22,12.83,0h1.7c.93,0,1.84.1,2.72.28,15.86,1.4,35.93,7.61,41.81,33.15Z"/>
+      <path class="cls-1" d="M79.9,96.15c13.77-3.93,25.38-14.04,31.4-27.11-5.88-25.54-25.95-31.75-41.81-33.15,6.05,1.27,10.63,6.66,10.63,13.07,0,7.34-5,13.06-13.35,13.35-35.4,1.26-44.28,25.75-37.47,33.37,2.47,2.76,4.95,5.11,6.75,6.91,5.15,5.15,41.64,41.31,41.64,41.31,13.8,14.02,36.28,14.02,50.3,0l-48.1-47.77Z"/>
+    </g>
+  </g>
+</svg>

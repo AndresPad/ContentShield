@@ -1,0 +1,88 @@
+# ContentShield local-dev composition
+# Default: runs the CPU orchestrator and points at the Stage2 URL configured in .env.
+# Optional: run `docker compose --profile gpu up` on an NVIDIA GPU host to also
+# build and run the local Stage2 vLLM wrapper service.
+
+services:
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      CONTENT_SAFETY_ENDPOINT: ${CONTENT_SAFETY_ENDPOINT:-}
+      CONTENT_SAFETY_API_VERSION: ${CONTENT_SAFETY_API_VERSION:-2024-09-01}
+      CONTENT_SAFETY_TIMEOUT_SECONDS: ${CONTENT_SAFETY_TIMEOUT_SECONDS:-15}
+      CONTENT_SAFETY_KEY: ${CONTENT_SAFETY_KEY:-}
+      STAGE1_AOAI_ENDPOINT: ${STAGE1_AOAI_ENDPOINT:-}
+      STAGE1_AOAI_EMBEDDING_DEPLOYMENT: ${STAGE1_AOAI_EMBEDDING_DEPLOYMENT:-text-embedding-3-small}
+      STAGE1_AOAI_API_VERSION: ${STAGE1_AOAI_API_VERSION:-2024-02-01}
+      STAGE1_AOAI_TIMEOUT_SECONDS: ${STAGE1_AOAI_TIMEOUT_SECONDS:-15}
+      STAGE1_AOAI_KEY: ${STAGE1_AOAI_KEY:-}
+      STAGE1_DECISION_THRESHOLD: ${STAGE1_DECISION_THRESHOLD:-}
+      STAGE1_EARLY_STOP_THRESHOLD: ${STAGE1_EARLY_STOP_THRESHOLD:-0.90}
+      SLM_ENDPOINT: ${SLM_ENDPOINT:-}
+      SLM_PATH: ${SLM_PATH:-/classify}
+      SLM_TIMEOUT_SECONDS: ${SLM_TIMEOUT_SECONDS:-15}
+      SLM_MODEL: ${SLM_MODEL:-google/gemma-4-31b-it}
+    ports:
+      - "${ORCHESTRATOR_PORT:-8080}:8080"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=3).read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  stage2:
+    profiles: ["gpu"]
+    build:
+      context: ./services/stage2
+      dockerfile: Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      HF_HOME: /models/.hf-cache
+      MODEL_NAME: ${MODEL_NAME:-google/gemma-4-31b-it}
+      MAX_MODEL_LEN: ${MAX_MODEL_LEN:-20000}
+      GPU_MEMORY_UTILIZATION: ${GPU_MEMORY_UTILIZATION:-0.9}
+      LANGUAGE_MODEL_ONLY: ${LANGUAGE_MODEL_ONLY:-true}
+      ENABLE_THINKING: ${ENABLE_THINKING:-false}
+      EXTRA_ENGINE_ARGS: ${EXTRA_ENGINE_ARGS:---enable-prefix-caching}
+      ENABLE_STAGE2_REASON: ${ENABLE_STAGE2_REASON:-false}
+      MAX_REASON_TOKENS: ${MAX_REASON_TOKENS:-64}
+    ports:
+      - "${STAGE2_PORT:-8081}:8080"
+    volumes:
+      - hf_cache:/models/.hf-cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=3).read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 20
+      start_period: 900s
+    restart: unless-stopped
+
+volumes:
+  hf_cache:

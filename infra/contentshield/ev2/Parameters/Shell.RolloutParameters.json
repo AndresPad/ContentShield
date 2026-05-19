@@ -1,0 +1,67 @@
+{
+  "$schema": "https://ev2schema.azure.net/schemas/2020-01-01/RolloutParameters.json",
+  "ContentVersion": "1.0.0.0",
+  "ShellExtensions": [
+    {
+      "Name": "preflight",
+      "Identity": {
+        "Type": "UserAssigned",
+        "UserAssignedIdentities": [ "$config(deploymentIdentity)" ]
+      },
+      "EnvironmentVariables": [
+        { "Name": "AZ_SUBSCRIPTION_ID", "Value": "$config(subscriptionId)" },
+        { "Name": "AZ_RESOURCE_GROUP",  "Value": "$config(resourceGroup)" },
+        { "Name": "AZ_LOCATION",         "Value": "$config(location)" },
+        { "Name": "SKIP_STAGE2",         "Value": "$config(skipStage2)" }
+      ],
+      "Package": {
+        "Reference": {
+          "Path": "Bin/preflight.sh"
+        }
+      }
+    },
+    {
+      "Name": "deploy",
+      "Identity": {
+        "Type": "UserAssigned",
+        "UserAssignedIdentities": [ "$config(deploymentIdentity)" ]
+      },
+      "EnvironmentVariables": [
+        { "Name": "AZ_SUBSCRIPTION_ID",     "Value": "$config(subscriptionId)" },
+        { "Name": "AZ_RESOURCE_GROUP",      "Value": "$config(resourceGroup)" },
+        { "Name": "AZ_LOCATION",            "Value": "$config(location)" },
+        { "Name": "NAME_SUFFIX",            "Value": "$config(nameSuffix)" },
+        { "Name": "APIM_PUBLISHER_EMAIL",   "Value": "$config(apimPublisherEmail)" },
+        { "Name": "VENDOR_ACR_FQDN",        "Value": "$config(vendorAcrFqdn)" },
+        { "Name": "IMAGE_TAG",              "Value": "$config(imageTag)" },
+        { "Name": "USE_AAD",                "Value": "$config(useAad)" },
+        { "Name": "SKIP_APIM",              "Value": "$config(skipApim)" },
+        { "Name": "SKIP_STAGE2",            "Value": "$config(skipStage2)" },
+        { "Name": "WAIT_FOR_PREWARM",       "Value": "$config(waitForPrewarm)" },
+        { "Name": "HF_TOKEN",               "AsSecureValue": true, "Reference": { "Provider": "AzureKeyVault", "Parameters": { "SecretId": "$config(hfTokenSecretId)" } } }
+      ],
+      "Package": {
+        "Reference": {
+          "Path": "Bin/deploy.sh"
+        }
+      }
+    },
+    {
+      "Name": "smoke",
+      "Identity": {
+        "Type": "UserAssigned",
+        "UserAssignedIdentities": [ "$config(deploymentIdentity)" ]
+      },
+      "EnvironmentVariables": [
+        { "Name": "AZ_SUBSCRIPTION_ID", "Value": "$config(subscriptionId)" },
+        { "Name": "AZ_RESOURCE_GROUP",  "Value": "$config(resourceGroup)" },
+        { "Name": "SMOKE_TIMEOUT_SECONDS", "Value": "$config(smokeTimeoutSeconds)" }
+      ],
+      "Package": {
+        "Reference": {
+          "Path": "Bin/smoke.sh"
+        }
+      }
+    }
+  ]
+}

@@ -62,12 +62,35 @@ param(
     [string]$VendorAcrTokenPassword,
     [string]$ImageTag = 'latest',
     [switch]$AllTags,
+    # When set, vendor ACR import uses the current az login identity (AAD/MI)
+    # instead of a scoped token. Intended for internal-Microsoft customers in
+    # the same AAD tenant as the vendor ACR. -VendorAcrTokenName/-Password
+    # become optional.
+    [switch]$UseAad,
+
+    # ── Weights (OCI artifact) sync ──────────────────────────────────────────
+    # When -VendorAcrFqdn is set, also copy contentshield-stage2-weights:<Tag>
+    # from the vendor ACR into the customer ACR via `oras copy` (AAD or token).
+    # Phase-2 then wires the prewarm job with modelSource=acr-oras so it
+    # hydrates the customer NFS share from the customer ACR — NOT HuggingFace.
+    [bool]$SyncWeights = $true,
+    [string]$WeightsRepository = 'contentshield-stage2-weights',
+    # Falls back to $ImageTag when empty.
+    [string]$WeightsTag = '',
 
     [switch]$Reset,
     [switch]$SkipApim,
     [switch]$SkipStage2,
     [switch]$SkipPreflight,
     [switch]$SkipImageImport,
+    [bool]$EnableArtifactStreaming = $true,
+    # If $true, fire the HF cache pre-warm Container Apps Job after deploy so
+    # the stage-2 NFS share is populated with model weights before any real
+    # cold start hits. Idempotent; safe to re-run.
+    [bool]$PrewarmHfCache = $true,
+    # If $true, block until the pre-warm job completes (success or fail).
+    # Default $false so deploy returns quickly; the job continues in background.
+    [switch]$WaitForPrewarm,
     [switch]$WhatIf
 )
 
@@ -122,15 +145,19 @@ if ($Reset) {
 $bicepFile = Join-Path $infraDir 'main.bicep'
 $paramFile = Join-Path $infraDir 'main.bicepparam'
 
-$useVendorImport = $VendorAcrFqdn -and $VendorAcrTokenName -and $VendorAcrTokenPassword -and -not $SkipImageImport
+$useVendorImport = $VendorAcrFqdn -and -not $SkipImageImport -and (
+    $UseAad -or ($VendorAcrTokenName -and $VendorAcrTokenPassword)
+)
 $phase1AppImages = $useVendorImport   # phase 1 uses placeholder images so container apps deploy before images exist
 
 # A reusable function that runs one bicep deployment with optional image overrides.
 function Invoke-BicepDeployment {
     param(
         [Parameter(Mandatory)][string]$Label,
-        [string]$AppImageOverride,
-        [string]$Stage2ImageOverride
+        [string]$AppImageTagOverride,
+        [string]$Stage2ImageTagOverride,
+        [string]$ModelSourceOverride,
+        [string]$WeightsTagOverride
     )
     $deploymentName = "contentshield-$Label-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
     $cmd = @(
@@ -143,12 +170,17 @@ function Invoke-BicepDeployment {
             "location=$Location",
             "apimPublisherEmail=$ApimPublisherEmail"
     )
-    if ($NameSuffix)         { $cmd += @('--parameters', "nameSuffix=$NameSuffix") }
-    if ($SkipApim)           { $cmd += @('--parameters','deployApim=false') }
-    if ($SkipStage2)         { $cmd += @('--parameters','deployStage2=false') }
-    if ($HfToken)            { $cmd += @('--parameters', "hfToken=$HfToken") }
-    if ($AppImageOverride)   { $cmd += @('--parameters', "appImage=$AppImageOverride") }
-    if ($Stage2ImageOverride){ $cmd += @('--parameters', "stage2Image=$Stage2ImageOverride") }
+    if ($NameSuffix)             { $cmd += @('--parameters', "nameSuffix=$NameSuffix") }
+    if ($SkipApim)               { $cmd += @('--parameters','deployApim=false') }
+    if ($SkipStage2)             { $cmd += @('--parameters','deployStage2=false') }
+    if ($HfToken)                { $cmd += @('--parameters', "hfToken=$HfToken") }
+    if ($AppImageTagOverride)    { $cmd += @('--parameters', "appImageTag=$AppImageTagOverride") }
+    if ($Stage2ImageTagOverride) { $cmd += @('--parameters', "stage2ImageTag=$Stage2ImageTagOverride") }
+    if ($ModelSourceOverride)    { $cmd += @('--parameters', "modelSource=$ModelSourceOverride") }
+    if ($WeightsTagOverride)     {
+        $cmd += @('--parameters', "weightsRepository=$WeightsRepository")
+        $cmd += @('--parameters', "weightsTag=$WeightsTagOverride")
+    }
 
     if ($WhatIf) {
         Write-Host "Running what-if for phase '$Label'..." -ForegroundColor Yellow
@@ -184,16 +216,116 @@ if ($useVendorImport) {
         -VendorAcrTokenPassword $VendorAcrTokenPassword `
         -Tag $ImageTag `
         -AllTags:$AllTags `
+        -EnableArtifactStreaming:$EnableArtifactStreaming `
+        -UseAad:$UseAad `
         -Force
     if ($LASTEXITCODE -ne 0) { throw "Image sync failed." }
 
-    # Phase 2: roll container apps to the freshly imported images.
-    $appImage    = "$($out.acrLoginServer.value)/contentshield:$ImageTag"
-    $stage2Image = "$($out.acrLoginServer.value)/contentshield-stage2:$ImageTag"
-    $result = Invoke-BicepDeployment -Label 'phase2-images' `
-        -AppImageOverride $appImage `
-        -Stage2ImageOverride $stage2Image
+    # Phase 2: roll container apps to the freshly imported images by tag.
+    # The bicep template builds the full image reference using the customer ACR
+    # login server, so we only need to pass the tag.
+
+    # ── Optionally also sync the weights OCI artifact (AAD or token). ────────
+    $effectiveWeightsTag = if ($WeightsTag) { $WeightsTag } else { $ImageTag }
+    $weightsSynced = $false
+    if ($SyncWeights) {
+        Write-Host "`nSyncing weights artifact ($WeightsRepository`:$effectiveWeightsTag) from vendor ACR -> $targetAcr ..." -ForegroundColor Cyan
+        & (Join-Path $infraDir 'scripts\sync-weights-from-vendor.ps1') `
+            -TargetAcrName $targetAcr `
+            -VendorAcrFqdn $VendorAcrFqdn `
+            -VendorAcrTokenName $VendorAcrTokenName `
+            -VendorAcrTokenPassword $VendorAcrTokenPassword `
+            -WeightsRepository $WeightsRepository `
+            -Tag $effectiveWeightsTag `
+            -UseAad:$UseAad `
+            -InstallOrasIfMissing
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  [warn] weights sync failed. Phase 2 will fall back to modelSource=hf-hub (HuggingFace) for the prewarm job." -ForegroundColor Yellow
+            $LASTEXITCODE = 0
+        } else {
+            $weightsSynced = $true
+        }
+    }
+
+    $phase2Args = @{
+        Label = 'phase2-images'
+        AppImageTagOverride = $ImageTag
+        Stage2ImageTagOverride = $ImageTag
+    }
+    if ($weightsSynced) {
+        $phase2Args['ModelSourceOverride'] = 'acr-oras'
+        $phase2Args['WeightsTagOverride'] = $effectiveWeightsTag
+    }
+    $result = Invoke-BicepDeployment @phase2Args
     $out = $result.properties.outputs
+}
+
+# ── Step 5c: ensure ACR Artifact Streaming is enabled on both repos. ──────────
+# Idempotent. Runs whether or not we just imported — covers the case where
+# images were pushed directly to the customer ACR by another path (ACR Task,
+# pipeline, etc.). Stage-2 is the big win: 10 GB images start streaming.
+if ($EnableArtifactStreaming -and -not $WhatIf) {
+    $targetAcr = ($out.acrLoginServer.value -split '\.')[0]
+    foreach ($repo in @('contentshield','contentshield-stage2')) {
+        Write-Host "Enabling auto artifact-streaming on $targetAcr/$repo ..." -ForegroundColor DarkGray
+        az acr artifact-streaming update `
+            --name $targetAcr `
+            --repository $repo `
+            --enable-auto-streaming True `
+            --only-show-errors 2>&1 | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  [warn] artifact-streaming update failed for $repo. (Premium ACR required; preview in some regions.)" -ForegroundColor Yellow
+            $LASTEXITCODE = 0
+        }
+    }
+}
+
+# ── Step 5d: kick the HF cache pre-warm job (one-shot, idempotent). ────────────
+# Populates the NFS hfcache share with the SLM weights so the first GPU cold
+# start does not pay the 5–10 min HuggingFace download. The job is a manual
+# Container Apps Job mounted on the same NFS share as stage-2. Safe to run
+# every deploy — HF skips already-cached files.
+$prewarmJobName = $out.hfPrewarmJobName.value
+if ($PrewarmHfCache -and -not $WhatIf -and $prewarmJobName) {
+    Write-Host "`nStarting HF cache pre-warm job '$prewarmJobName' ..." -ForegroundColor Cyan
+    $startJson = az containerapp job start `
+        --name $prewarmJobName `
+        --resource-group $ResourceGroup `
+        --only-show-errors -o json 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [warn] could not start pre-warm job: $startJson" -ForegroundColor Yellow
+        $LASTEXITCODE = 0
+    } else {
+        try {
+            $execution = $startJson | ConvertFrom-Json
+            $execName = $execution.name
+            Write-Host "  execution: $execName" -ForegroundColor DarkGray
+            if ($WaitForPrewarm) {
+                Write-Host "  -WaitForPrewarm: polling until job execution completes (up to 1h)..." -ForegroundColor DarkGray
+                $deadline = (Get-Date).AddMinutes(60)
+                while ((Get-Date) -lt $deadline) {
+                    Start-Sleep -Seconds 20
+                    $status = az containerapp job execution show `
+                        --name $prewarmJobName `
+                        --resource-group $ResourceGroup `
+                        --job-execution-name $execName `
+                        --query "properties.status" -o tsv 2>$null
+                    Write-Host "    status: $status" -ForegroundColor DarkGray
+                    if ($status -in @('Succeeded','Failed','Stopped','Degraded')) { break }
+                }
+                if ($status -ne 'Succeeded') {
+                    Write-Host "  [warn] pre-warm job ended with status '$status'. Check logs: az containerapp job execution show -n $prewarmJobName -g $ResourceGroup --job-execution-name $execName" -ForegroundColor Yellow
+                } else {
+                    Write-Host "  [OK] pre-warm complete." -ForegroundColor Green
+                }
+            } else {
+                Write-Host "  Job is running in the background. Track with:" -ForegroundColor DarkGray
+                Write-Host "    az containerapp job execution show -n $prewarmJobName -g $ResourceGroup --job-execution-name $execName" -ForegroundColor DarkGray
+            }
+        } catch {
+            Write-Host "  [warn] could not parse job-start response (job may still be running)." -ForegroundColor Yellow
+        }
+    }
 }
 
 Write-Host "`n======================================" -ForegroundColor Green

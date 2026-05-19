@@ -115,11 +115,17 @@ param acrSku string = 'Premium'
 
 // ── Container Apps ──────────────────────────────────────────────────────────
 
-@description('Image for ca-ratio-contentshield. Defaults to mcr quickstart so the template can deploy before customer images are pushed.')
+@description('Image for ca-ratio-contentshield. Defaults to mcr quickstart so the template can deploy before customer images are pushed. Overridden by appImageTag when that is non-empty.')
 param appImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
 
-@description('Image for ca-contentshield-stage2 (GPU). Defaults to mcr quickstart.')
+@description('Image for ca-contentshield-stage2 (GPU). Defaults to mcr quickstart. Overridden by stage2ImageTag when that is non-empty.')
 param stage2Image string = 'mcr.microsoft.com/k8se/quickstart:latest'
+
+@description('Tag for ca-ratio-contentshield in the customer ACR. When non-empty, builds the full image reference as "<acrLoginServer>/contentshield:<tag>" and overrides appImage. Leave empty to use appImage as-is (placeholder/dev).')
+param appImageTag string = ''
+
+@description('Tag for ca-contentshield-stage2 in the customer ACR. When non-empty, builds the full image reference as "<acrLoginServer>/contentshield-stage2:<tag>" and overrides stage2Image. Leave empty to use stage2Image as-is (placeholder/dev).')
+param stage2ImageTag string = ''
 
 @description('Target port for ca-ratio-contentshield.')
 param appTargetPort int = 8080
@@ -155,11 +161,30 @@ param slmModel string = 'google/gemma-4-31b-it'
 @description('Feature flag CONTENTSHIELD_V1_ML_DISABLED on the main app. "1" disables the legacy ML path; "0" re-enables it.')
 param contentshieldV1MlDisabled string = '1'
 
-@description('Cache-buster injected as REDEPLOY_TS env var on both apps. Bump to force a new revision even when no other property changes. Leave empty to omit.')
-param redeployTimestamp string = ''
-
 @description('Deploy a brand-new Premium FileStorage account + NFS hfcache share inside this RG. When true, the values of nfsServer/nfsShareName are ignored and computed from the new storage account.')
 param deployStorage bool = true
+
+@description('Deploy the HuggingFace cache pre-warm job. The job runs on demand (kicked off by deploy.ps1) and populates the NFS hfcache share with the stage-2 SLM weights so the first GPU cold start skips the multi-minute download. Requires deployStorage=true and deployStage2=true to be useful.')
+param deployHfPrewarmJob bool = true
+
+@description('Container Apps Job name for the HF cache pre-warm.')
+param hfPrewarmJobName string = 'job-hf-prewarm'
+
+@description('Source of the model weights for the pre-warm job. "hf-hub" downloads from huggingface.co (default, back-compat); "acr-oras" pulls the OCI weights artifact from the customer ACR (populated via sync-weights-from-vendor.ps1).')
+@allowed([
+  'hf-hub'
+  'acr-oras'
+])
+param modelSource string = 'hf-hub'
+
+@description('Repository name of the weights OCI artifact in the customer ACR (used when modelSource = "acr-oras").')
+param weightsRepository string = 'contentshield-stage2-weights'
+
+@description('Tag of the weights OCI artifact to pull (used when modelSource = "acr-oras"). If empty, falls back to stage2ImageTag.')
+param weightsTag string = ''
+
+@description('Use the weights-baked stage-2 image variant. When true, the stage-2 container app pulls contentshield-stage2-baked:<tag> (weights already in the image, sub-60s cold start via artifact streaming), the NFS hfcache mount is suppressed, and the HF cache pre-warm job is skipped. Requires publish-image.ps1 -WithWeights to have published the matching baked tag.')
+param weightsInImage bool = false
 
 // ── APIM ────────────────────────────────────────────────────────────────────
 
@@ -273,6 +298,20 @@ module acr 'modules/acr.bicep' = {
   }
 }
 
+// Resolve effective images: if a tag is supplied, point at the customer ACR;
+// otherwise fall back to the explicit appImage / stage2Image (placeholder or
+// hand-set value). Keeps two-phase deploy working: phase 1 uses defaults,
+// phase 2 supplies tags after import.
+//
+// When weightsInImage=true, stage-2 swaps to the contentshield-stage2-baked
+// repo (weights pre-baked into the image, no NFS needed).
+var effectiveAppImage = empty(appImageTag) ? appImage : '${acr.outputs.loginServer}/contentshield:${appImageTag}'
+var stage2RepoName = weightsInImage ? 'contentshield-stage2-baked' : 'contentshield-stage2'
+var effectiveStage2Image = empty(stage2ImageTag) ? stage2Image : '${acr.outputs.loginServer}/${stage2RepoName}:${stage2ImageTag}'
+
+// NFS mount is irrelevant for the baked variant (weights live on local SSD).
+var nfsStorageMountedEffective = !weightsInImage && !empty(effectiveNfsServer) && !empty(effectiveNfsShareName)
+
 // 5. Container Apps Environment (depends on network + monitoring)
 module cae 'modules/containerAppsEnv.bicep' = {
   name: 'mod-cae'
@@ -302,26 +341,50 @@ module apps 'modules/containerApps.bicep' = {
     acrResourceId: acr.outputs.id
     appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
     contentSafetyEndpoint: contentSafety.outputs.endpoint
+    contentSafetyResourceId: contentSafety.outputs.id
     ratioAiDevClientId: ratioAiDevClientId
     appName: appName
-    appImage: appImage
+    appImage: effectiveAppImage
     appTargetPort: appTargetPort
     natGatewayPublicIp: network.outputs.natGatewayPublicIp
     caeStaticIp: cae.outputs.staticIp
     extraStage2AllowedIps: extraStage2AllowedIps
     slmModel: slmModel
     contentshieldV1MlDisabled: contentshieldV1MlDisabled
-    redeployTimestamp: redeployTimestamp
     deployStage2: deployStage2
     stage2AppName: stage2AppName
-    stage2Image: stage2Image
+    stage2Image: effectiveStage2Image
     stage2TargetPort: stage2TargetPort
     gpuWorkloadProfileName: gpuWorkloadProfileName
     hfToken: hfToken
-    nfsStorageMounted: !empty(effectiveNfsServer) && !empty(effectiveNfsShareName)
+    nfsStorageMounted: nfsStorageMountedEffective
     storageAccountName: effectiveStorageAccountName
     hfCacheShareName: hfCacheShareName
   }
+}
+
+// 6b. HF cache pre-warm job (manual-trigger; fired by deploy.ps1 post-deploy)
+module hfPrewarmJob 'modules/hfPrewarmJob.bicep' = if (deployHfPrewarmJob && deployStorage && deployStage2 && !weightsInImage) {
+  name: 'mod-hfprewarm'
+  params: {
+    location: location
+    tags: tags
+    caeName: cae.outputs.name
+    jobName: hfPrewarmJobName
+    model: slmModel
+    storageAccountName: effectiveStorageAccountName
+    hfCacheShareName: hfCacheShareName
+    hfToken: hfToken
+    appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
+    modelSource: modelSource
+    weightsAcrName: acrName
+    weightsAcrLoginServer: acr.outputs.loginServer
+    weightsRepository: weightsRepository
+    weightsTag: empty(weightsTag) ? stage2ImageTag : weightsTag
+  }
+  dependsOn: [
+    apps
+  ]
 }
 
 // 7. APIM (slowest — last; depends on VNet subnet)
@@ -370,3 +433,4 @@ output storageAccountName string = deployStorage ? storage!.outputs.name : ''
 output storageNfsHost string = deployStorage ? storage!.outputs.fileEndpointHost : ''
 output storageNfsSharePath string = deployStorage ? storage!.outputs.nfsSharePath : ''
 output hfCacheMountPath string = deployStorage ? '/mount/${storage!.outputs.name}/${hfCacheShareName}' : ''
+output hfPrewarmJobName string = (deployHfPrewarmJob && deployStorage && deployStage2 && !weightsInImage) ? hfPrewarmJob!.outputs.jobName : ''

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://ev2schema.azure.net/schemas/2020-01-01/RolloutSpecification.json",
+  "ContentVersion": "1.0.0.0",
+  "RolloutMetadata": {
+    "ServiceModelPath": "ServiceModel.json",
+    "Name": "ContentShield.Rollout",
+    "RolloutType": "Major",
+    "BuildSource": {
+      "Parameters": {
+        "VersionFile": "buildver.txt"
+      }
+    },
+    "Notification": {
+      "Email": {
+        "To": "$config(notificationEmail)"
+      }
+    }
+  },
+  "OrchestratedSteps": [
+    {
+      "Name": "Preflight",
+      "TargetType": "ServiceResource",
+      "TargetName": "ContentShield.Shell",
+      "Actions": [
+        "Shell/preflight"
+      ]
+    },
+    {
+      "Name": "Deploy",
+      "TargetType": "ServiceResource",
+      "TargetName": "ContentShield.Shell",
+      "Actions": [
+        "Shell/deploy"
+      ],
+      "DependsOn": [
+        "Preflight"
+      ]
+    },
+    {
+      "Name": "Smoke",
+      "TargetType": "ServiceResource",
+      "TargetName": "ContentShield.Shell",
+      "Actions": [
+        "Shell/smoke"
+      ],
+      "DependsOn": [
+        "Deploy"
+      ]
+    }
+  ]
+}

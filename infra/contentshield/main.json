@@ -1,0 +1,3008 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.43.8.12551",
+      "templateHash": "4099100075183317919"
+    }
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "westus3",
+      "metadata": {
+        "description": "Azure region for all resources."
+      }
+    },
+    "nameSuffix": {
+      "type": "string",
+      "defaultValue": "[take(uniqueString(subscription().id), 6)]",
+      "metadata": {
+        "description": "Globally-unique suffix appended to resources that require unique names (ACR, Content Safety, APIM, etc.). Default: a deterministic 6-char hash of your subscription id, guaranteeing uniqueness across customers. Override with your own short alphanumeric token."
+      }
+    },
+    "tags": {
+      "type": "object",
+      "defaultValue": {
+        "workload": "contentshield",
+        "managedBy": "bicep"
+      },
+      "metadata": {
+        "description": "Tags applied to every resource."
+      }
+    },
+    "logAnalyticsName": {
+      "type": "string",
+      "defaultValue": "[format('log-contentshield-{0}', parameters('nameSuffix'))]",
+      "metadata": {
+        "description": "Log Analytics workspace name."
+      }
+    },
+    "appInsightsName": {
+      "type": "string",
+      "defaultValue": "[format('appi-contentshield-{0}', parameters('nameSuffix'))]",
+      "metadata": {
+        "description": "Application Insights name."
+      }
+    },
+    "contentSafetyName": {
+      "type": "string",
+      "defaultValue": "[format('cs-ai-contentsafety-{0}', parameters('nameSuffix'))]",
+      "metadata": {
+        "description": "Content Safety account name (must be globally unique)."
+      }
+    },
+    "publicIpName": {
+      "type": "string",
+      "defaultValue": "CONTENTSHIELD-NATGW-PIP",
+      "metadata": {
+        "description": "Public IP name (regional uniqueness only)."
+      }
+    },
+    "natGatewayName": {
+      "type": "string",
+      "defaultValue": "CONTENTSHIELD-NATGW-WUS3",
+      "metadata": {
+        "description": "NAT Gateway name."
+      }
+    },
+    "nsgMainName": {
+      "type": "string",
+      "defaultValue": "NSG-contentshield-westus3",
+      "metadata": {
+        "description": "Main NSG name."
+      }
+    },
+    "nsgGpuName": {
+      "type": "string",
+      "defaultValue": "NSG-contentshield-vllm-gpu-subnet-westus3",
+      "metadata": {
+        "description": "GPU subnet NSG name."
+      }
+    },
+    "vnetName": {
+      "type": "string",
+      "defaultValue": "vnet-contentshield-westus3",
+      "metadata": {
+        "description": "Virtual network name."
+      }
+    },
+    "acrName": {
+      "type": "string",
+      "defaultValue": "[format('contentshieldacr{0}', parameters('nameSuffix'))]",
+      "metadata": {
+        "description": "Azure Container Registry name (lowercase alphanumeric only, globally unique)."
+      }
+    },
+    "caeName": {
+      "type": "string",
+      "defaultValue": "[format('cae-contentshield-{0}', parameters('nameSuffix'))]",
+      "metadata": {
+        "description": "Container Apps Environment name."
+      }
+    },
+    "appName": {
+      "type": "string",
+      "defaultValue": "ca-ratio-contentshield",
+      "metadata": {
+        "description": "Main application Container App name."
+      }
+    },
+    "stage2AppName": {
+      "type": "string",
+      "defaultValue": "ca-contentshield-stage2",
+      "metadata": {
+        "description": "Stage-2 GPU Container App name."
+      }
+    },
+    "apimName": {
+      "type": "string",
+      "defaultValue": "[format('apim-contentshield-{0}', parameters('nameSuffix'))]",
+      "metadata": {
+        "description": "API Management service name (globally unique)."
+      }
+    },
+    "storageAccountName": {
+      "type": "string",
+      "defaultValue": "[toLower(format('csaivllmnfs{0}', parameters('nameSuffix')))]",
+      "minLength": 3,
+      "maxLength": 24,
+      "metadata": {
+        "description": "Premium FileStorage account name for NFS hfcache share (globally unique, 3-24 lowercase alphanumeric)."
+      }
+    },
+    "hfCacheShareName": {
+      "type": "string",
+      "defaultValue": "hfcache",
+      "metadata": {
+        "description": "NFS file share name on the storage account."
+      }
+    },
+    "hfCacheShareQuotaGiB": {
+      "type": "int",
+      "defaultValue": 500,
+      "metadata": {
+        "description": "Quota for the NFS share, GiB."
+      }
+    },
+    "vnetAddressPrefix": {
+      "type": "string",
+      "defaultValue": "10.40.0.0/16",
+      "metadata": {
+        "description": "VNet address space."
+      }
+    },
+    "subnetCaePrefix": {
+      "type": "string",
+      "defaultValue": "10.40.2.0/23",
+      "metadata": {
+        "description": "Subnet for Container Apps Environment (workload profile, non-GPU)."
+      }
+    },
+    "subnetGpuPrefix": {
+      "type": "string",
+      "defaultValue": "10.40.0.0/23",
+      "metadata": {
+        "description": "Subnet reserved for GPU workloads (Microsoft.Storage service endpoint)."
+      }
+    },
+    "subnetApimPrefix": {
+      "type": "string",
+      "defaultValue": "10.40.4.0/24",
+      "metadata": {
+        "description": "Subnet for APIM v2 (delegated to Microsoft.Web/serverFarms)."
+      }
+    },
+    "contentSafetySku": {
+      "type": "string",
+      "defaultValue": "S0",
+      "metadata": {
+        "description": "Content Safety SKU."
+      }
+    },
+    "acrSku": {
+      "type": "string",
+      "defaultValue": "Premium",
+      "allowedValues": [
+        "Basic",
+        "Standard",
+        "Premium"
+      ],
+      "metadata": {
+        "description": "ACR SKU. Premium needed for zone-redundancy and private endpoints."
+      }
+    },
+    "appImage": {
+      "type": "string",
+      "defaultValue": "mcr.microsoft.com/k8se/quickstart:latest",
+      "metadata": {
+        "description": "Image for ca-ratio-contentshield. Defaults to mcr quickstart so the template can deploy before customer images are pushed. Overridden by appImageTag when that is non-empty."
+      }
+    },
+    "stage2Image": {
+      "type": "string",
+      "defaultValue": "mcr.microsoft.com/k8se/quickstart:latest",
+      "metadata": {
+        "description": "Image for ca-contentshield-stage2 (GPU). Defaults to mcr quickstart. Overridden by stage2ImageTag when that is non-empty."
+      }
+    },
+    "appImageTag": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Tag for ca-ratio-contentshield in the customer ACR. When non-empty, builds the full image reference as \"<acrLoginServer>/contentshield:<tag>\" and overrides appImage. Leave empty to use appImage as-is (placeholder/dev)."
+      }
+    },
+    "stage2ImageTag": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Tag for ca-contentshield-stage2 in the customer ACR. When non-empty, builds the full image reference as \"<acrLoginServer>/contentshield-stage2:<tag>\" and overrides stage2Image. Leave empty to use stage2Image as-is (placeholder/dev)."
+      }
+    },
+    "appTargetPort": {
+      "type": "int",
+      "defaultValue": 8080,
+      "metadata": {
+        "description": "Target port for ca-ratio-contentshield."
+      }
+    },
+    "stage2TargetPort": {
+      "type": "int",
+      "defaultValue": 8080,
+      "metadata": {
+        "description": "Target port for ca-contentshield-stage2."
+      }
+    },
+    "gpuWorkloadProfileName": {
+      "type": "string",
+      "defaultValue": "NC24-A100",
+      "metadata": {
+        "description": "GPU workload profile name. Default NC24-A100. Set to empty string to skip the GPU profile (and skip stage2 GPU deployment)."
+      }
+    },
+    "gpuWorkloadProfileType": {
+      "type": "string",
+      "defaultValue": "Consumption-GPU-NC24-A100",
+      "metadata": {
+        "description": "GPU workload profile type. Common: Consumption-GPU-NC24-A100, Consumption-GPU-NC8as-T4."
+      }
+    },
+    "deployStage2": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Deploy the stage-2 GPU container app. Set false to skip (e.g., during initial testing if GPU quota unavailable)."
+      }
+    },
+    "extraStage2AllowedIps": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Extra IP CIDR ranges to add to stage-2 ingress allowlist (e.g., the stage-2 app outbound IP after first deploy)."
+      }
+    },
+    "hfToken": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional Hugging Face token for stage-2 model download. Leave empty to skip the secret."
+      }
+    },
+    "nfsServer": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional NFS Azure Files server (e.g., mystorage.file.core.windows.net) used to mount HF cache for stage-2. Leave empty to skip storage mount."
+      }
+    },
+    "nfsShareName": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional NFS share path (e.g., /mystorage/hfcache). Leave empty to skip storage mount."
+      }
+    },
+    "slmModel": {
+      "type": "string",
+      "defaultValue": "google/gemma-4-31b-it",
+      "metadata": {
+        "description": "Model name advertised to the main app (SLM_MODEL) and served by stage-2 (MODEL_NAME)."
+      }
+    },
+    "contentshieldV1MlDisabled": {
+      "type": "string",
+      "defaultValue": "1",
+      "metadata": {
+        "description": "Feature flag CONTENTSHIELD_V1_ML_DISABLED on the main app. \"1\" disables the legacy ML path; \"0\" re-enables it."
+      }
+    },
+    "deployStorage": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Deploy a brand-new Premium FileStorage account + NFS hfcache share inside this RG. When true, the values of nfsServer/nfsShareName are ignored and computed from the new storage account."
+      }
+    },
+    "deployHfPrewarmJob": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Deploy the HuggingFace cache pre-warm job. The job runs on demand (kicked off by deploy.ps1) and populates the NFS hfcache share with the stage-2 SLM weights so the first GPU cold start skips the multi-minute download. Requires deployStorage=true and deployStage2=true to be useful."
+      }
+    },
+    "hfPrewarmJobName": {
+      "type": "string",
+      "defaultValue": "job-hf-prewarm",
+      "metadata": {
+        "description": "Container Apps Job name for the HF cache pre-warm."
+      }
+    },
+    "modelSource": {
+      "type": "string",
+      "defaultValue": "hf-hub",
+      "allowedValues": [
+        "hf-hub",
+        "acr-oras"
+      ],
+      "metadata": {
+        "description": "Source of the model weights for the pre-warm job. \"hf-hub\" downloads from huggingface.co (default, back-compat); \"acr-oras\" pulls the OCI weights artifact from the customer ACR (populated via sync-weights-from-vendor.ps1)."
+      }
+    },
+    "weightsRepository": {
+      "type": "string",
+      "defaultValue": "contentshield-stage2-weights",
+      "metadata": {
+        "description": "Repository name of the weights OCI artifact in the customer ACR (used when modelSource = \"acr-oras\")."
+      }
+    },
+    "weightsTag": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Tag of the weights OCI artifact to pull (used when modelSource = \"acr-oras\"). If empty, falls back to stage2ImageTag."
+      }
+    },
+    "weightsInImage": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Use the weights-baked stage-2 image variant. When true, the stage-2 container app pulls contentshield-stage2-baked:<tag> (weights already in the image, sub-60s cold start via artifact streaming), the NFS hfcache mount is suppressed, and the HF cache pre-warm job is skipped. Requires publish-image.ps1 -WithWeights to have published the matching baked tag."
+      }
+    },
+    "apimSku": {
+      "type": "string",
+      "defaultValue": "StandardV2",
+      "allowedValues": [
+        "StandardV2",
+        "PremiumV2",
+        "BasicV2"
+      ],
+      "metadata": {
+        "description": "APIM SKU. StandardV2 supports VNet integration in West US 3."
+      }
+    },
+    "apimCapacity": {
+      "type": "int",
+      "defaultValue": 1,
+      "metadata": {
+        "description": "APIM capacity (units)."
+      }
+    },
+    "apimPublisherEmail": {
+      "type": "string",
+      "metadata": {
+        "description": "APIM publisher email."
+      }
+    },
+    "apimPublisherName": {
+      "type": "string",
+      "defaultValue": "ratio",
+      "metadata": {
+        "description": "APIM publisher name."
+      }
+    },
+    "deployApim": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Deploy API Management. Slow (~30-45 min). Set false to skip during iterative testing."
+      }
+    },
+    "aadTenantId": {
+      "type": "string",
+      "defaultValue": "[subscription().tenantId]",
+      "metadata": {
+        "description": "AAD tenant id stamped into APIM named values (used by validate-azure-ad-token policy). Defaults to the tenant the deployment is running in."
+      }
+    },
+    "aadApiAudience": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "AAD audience that the APIM policy validates incoming bearer tokens against. Defaults to ratioAiDevClientId — set to the API app registration client id for production."
+      }
+    },
+    "aadApiClientId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "AAD client (application) id of the API. Stored as an APIM named value. Defaults to ratioAiDevClientId."
+      }
+    },
+    "ratioAiDevClientId": {
+      "type": "string",
+      "defaultValue": "aceb273b-5301-46a4-91c9-c17ef0ff92e9",
+      "metadata": {
+        "description": "Client (Application) ID of the Entra app registration RatioAIDev. Exposed to container apps as RATIO_AI_DEV_CLIENT_ID."
+      }
+    }
+  },
+  "variables": {
+    "stage2RepoName": "[if(parameters('weightsInImage'), 'contentshield-stage2-baked', 'contentshield-stage2')]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "mod-monitoring",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "logAnalyticsName": {
+            "value": "[parameters('logAnalyticsName')]"
+          },
+          "appInsightsName": {
+            "value": "[parameters('appInsightsName')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "8632292196138353728"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "object"
+            },
+            "logAnalyticsName": {
+              "type": "string"
+            },
+            "appInsightsName": {
+              "type": "string"
+            },
+            "retentionInDays": {
+              "type": "int",
+              "defaultValue": 30,
+              "metadata": {
+                "description": "Workspace retention in days (Pay-as-you-go default 30)."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.OperationalInsights/workspaces",
+              "apiVersion": "2023-09-01",
+              "name": "[parameters('logAnalyticsName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "sku": {
+                  "name": "PerGB2018"
+                },
+                "retentionInDays": "[parameters('retentionInDays')]",
+                "features": {
+                  "enableLogAccessUsingOnlyResourcePermissions": true
+                },
+                "publicNetworkAccessForIngestion": "Enabled",
+                "publicNetworkAccessForQuery": "Enabled"
+              }
+            },
+            {
+              "type": "Microsoft.Insights/components",
+              "apiVersion": "2020-02-02",
+              "name": "[parameters('appInsightsName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "kind": "web",
+              "properties": {
+                "Application_Type": "web",
+                "Flow_Type": "Redfield",
+                "Request_Source": "IbizaAIExtension",
+                "IngestionMode": "LogAnalytics",
+                "WorkspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName'))]",
+                "RetentionInDays": 90,
+                "publicNetworkAccessForIngestion": "Enabled",
+                "publicNetworkAccessForQuery": "Enabled"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "logAnalyticsId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName'))]"
+            },
+            "logAnalyticsCustomerId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName')), '2023-09-01').customerId]"
+            },
+            "logAnalyticsSharedKey": {
+              "type": "string",
+              "value": "[listKeys(resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName')), '2023-09-01').primarySharedKey]"
+            },
+            "appInsightsId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Insights/components', parameters('appInsightsName'))]"
+            },
+            "appInsightsConnectionString": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Insights/components', parameters('appInsightsName')), '2020-02-02').ConnectionString]"
+            },
+            "appInsightsInstrumentationKey": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Insights/components', parameters('appInsightsName')), '2020-02-02').InstrumentationKey]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "mod-contentsafety",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "name": {
+            "value": "[parameters('contentSafetyName')]"
+          },
+          "sku": {
+            "value": "[parameters('contentSafetySku')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "7793948972821014896"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "object"
+            },
+            "name": {
+              "type": "string"
+            },
+            "sku": {
+              "type": "string",
+              "defaultValue": "S0"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.CognitiveServices/accounts",
+              "apiVersion": "2024-10-01",
+              "name": "[parameters('name')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "kind": "ContentSafety",
+              "sku": {
+                "name": "[parameters('sku')]"
+              },
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {
+                "customSubDomainName": "[parameters('name')]",
+                "publicNetworkAccess": "Enabled",
+                "disableLocalAuth": true,
+                "networkAcls": {
+                  "defaultAction": "Allow",
+                  "ipRules": [],
+                  "virtualNetworkRules": []
+                }
+              }
+            }
+          ],
+          "outputs": {
+            "id": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.CognitiveServices/accounts', parameters('name'))]"
+            },
+            "name": {
+              "type": "string",
+              "value": "[parameters('name')]"
+            },
+            "endpoint": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.CognitiveServices/accounts', parameters('name')), '2024-10-01').endpoint]"
+            },
+            "principalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.CognitiveServices/accounts', parameters('name')), '2024-10-01', 'full').identity.principalId]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "mod-network",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "publicIpName": {
+            "value": "[parameters('publicIpName')]"
+          },
+          "natGatewayName": {
+            "value": "[parameters('natGatewayName')]"
+          },
+          "nsgMainName": {
+            "value": "[parameters('nsgMainName')]"
+          },
+          "nsgGpuName": {
+            "value": "[parameters('nsgGpuName')]"
+          },
+          "vnetName": {
+            "value": "[parameters('vnetName')]"
+          },
+          "vnetAddressPrefix": {
+            "value": "[parameters('vnetAddressPrefix')]"
+          },
+          "subnetCaePrefix": {
+            "value": "[parameters('subnetCaePrefix')]"
+          },
+          "subnetGpuPrefix": {
+            "value": "[parameters('subnetGpuPrefix')]"
+          },
+          "subnetApimPrefix": {
+            "value": "[parameters('subnetApimPrefix')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "16560671845761264756"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "object"
+            },
+            "publicIpName": {
+              "type": "string"
+            },
+            "natGatewayName": {
+              "type": "string"
+            },
+            "nsgMainName": {
+              "type": "string"
+            },
+            "nsgGpuName": {
+              "type": "string"
+            },
+            "vnetName": {
+              "type": "string"
+            },
+            "vnetAddressPrefix": {
+              "type": "string"
+            },
+            "subnetCaePrefix": {
+              "type": "string"
+            },
+            "subnetGpuPrefix": {
+              "type": "string"
+            },
+            "subnetApimPrefix": {
+              "type": "string"
+            }
+          },
+          "variables": {
+            "nrmsRules": [
+              {
+                "name": "NRMS-Rule-101",
+                "properties": {
+                  "description": "Created by Azure Core Security managed policy, placeholder you can delete",
+                  "priority": 101,
+                  "direction": "Inbound",
+                  "access": "Allow",
+                  "protocol": "Tcp",
+                  "sourceAddressPrefix": "VirtualNetwork",
+                  "sourcePortRange": "*",
+                  "destinationAddressPrefix": "*",
+                  "destinationPortRange": "443"
+                }
+              },
+              {
+                "name": "NRMS-Rule-103",
+                "properties": {
+                  "description": "Created by Azure Core Security managed policy",
+                  "priority": 103,
+                  "direction": "Inbound",
+                  "access": "Allow",
+                  "protocol": "*",
+                  "sourceAddressPrefix": "CorpNetPublic",
+                  "sourcePortRange": "*",
+                  "destinationAddressPrefix": "*",
+                  "destinationPortRange": "*"
+                }
+              },
+              {
+                "name": "NRMS-Rule-104",
+                "properties": {
+                  "description": "Created by Azure Core Security managed policy",
+                  "priority": 104,
+                  "direction": "Inbound",
+                  "access": "Allow",
+                  "protocol": "*",
+                  "sourceAddressPrefix": "CorpNetSaw",
+                  "sourcePortRange": "*",
+                  "destinationAddressPrefix": "*",
+                  "destinationPortRange": "*"
+                }
+              },
+              {
+                "name": "NRMS-Rule-105",
+                "properties": {
+                  "description": "DO NOT DELETE - Azure Core Security",
+                  "priority": 105,
+                  "direction": "Inbound",
+                  "access": "Deny",
+                  "protocol": "*",
+                  "sourceAddressPrefix": "Internet",
+                  "sourcePortRange": "*",
+                  "destinationAddressPrefix": "*",
+                  "destinationPortRanges": [
+                    "1433",
+                    "1434",
+                    "3306",
+                    "4333",
+                    "5432",
+                    "6379",
+                    "7000",
+                    "7001",
+                    "7199",
+                    "9042",
+                    "9160",
+                    "9300",
+                    "16379",
+                    "26379",
+                    "27017"
+                  ]
+                }
+              },
+              {
+                "name": "NRMS-Rule-106",
+                "properties": {
+                  "description": "DO NOT DELETE - Azure Core Security",
+                  "priority": 106,
+                  "direction": "Inbound",
+                  "access": "Deny",
+                  "protocol": "Tcp",
+                  "sourceAddressPrefix": "Internet",
+                  "sourcePortRange": "*",
+                  "destinationAddressPrefix": "*",
+                  "destinationPortRanges": [
+                    "22",
+                    "3389"
+                  ]
+                }
+              },
+              {
+                "name": "NRMS-Rule-107",
+                "properties": {
+                  "description": "DO NOT DELETE - Azure Core Security",
+                  "priority": 107,
+                  "direction": "Inbound",
+                  "access": "Deny",
+                  "protocol": "Tcp",
+                  "sourceAddressPrefix": "Internet",
+                  "sourcePortRange": "*",
+                  "destinationAddressPrefix": "*",
+                  "destinationPortRanges": [
+                    "23",
+                    "135",
+                    "445",
+                    "5985",
+                    "5986"
+                  ]
+                }
+              },
+              {
+                "name": "NRMS-Rule-108",
+                "properties": {
+                  "description": "DO NOT DELETE - Azure Core Security",
+                  "priority": 108,
+                  "direction": "Inbound",
+                  "access": "Deny",
+                  "protocol": "*",
+                  "sourceAddressPrefix": "Internet",
+                  "sourcePortRange": "*",
+                  "destinationAddressPrefix": "*",
+                  "destinationPortRanges": [
+                    "13",
+                    "17",
+                    "19",
+                    "53",
+                    "69",
+                    "111",
+                    "123",
+                    "512",
+                    "514",
+                    "593",
+                    "873",
+                    "1900",
+                    "5353",
+                    "11211"
+                  ]
+                }
+              },
+              {
+                "name": "NRMS-Rule-109",
+                "properties": {
+                  "description": "DO NOT DELETE - Azure Core Security",
+                  "priority": 109,
+                  "direction": "Inbound",
+                  "access": "Deny",
+                  "protocol": "*",
+                  "sourceAddressPrefix": "Internet",
+                  "sourcePortRange": "*",
+                  "destinationAddressPrefix": "*",
+                  "destinationPortRanges": [
+                    "119",
+                    "137",
+                    "138",
+                    "139",
+                    "161",
+                    "162",
+                    "389",
+                    "636",
+                    "2049",
+                    "2301",
+                    "2381",
+                    "3268",
+                    "5800",
+                    "5900"
+                  ]
+                }
+              }
+            ]
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Network/publicIPAddresses",
+              "apiVersion": "2024-05-01",
+              "name": "[parameters('publicIpName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "sku": {
+                "name": "Standard",
+                "tier": "Regional"
+              },
+              "zones": [
+                "1",
+                "2",
+                "3"
+              ],
+              "properties": {
+                "publicIPAllocationMethod": "Static",
+                "publicIPAddressVersion": "IPv4",
+                "idleTimeoutInMinutes": 4
+              }
+            },
+            {
+              "type": "Microsoft.Network/natGateways",
+              "apiVersion": "2024-05-01",
+              "name": "[parameters('natGatewayName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "sku": {
+                "name": "Standard"
+              },
+              "properties": {
+                "idleTimeoutInMinutes": 4,
+                "publicIpAddresses": [
+                  {
+                    "id": "[resourceId('Microsoft.Network/publicIPAddresses', parameters('publicIpName'))]"
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/publicIPAddresses', parameters('publicIpName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Network/networkSecurityGroups",
+              "apiVersion": "2024-05-01",
+              "name": "[parameters('nsgMainName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "securityRules": "[variables('nrmsRules')]"
+              }
+            },
+            {
+              "type": "Microsoft.Network/networkSecurityGroups",
+              "apiVersion": "2024-05-01",
+              "name": "[parameters('nsgGpuName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "securityRules": "[variables('nrmsRules')]"
+              }
+            },
+            {
+              "type": "Microsoft.Network/virtualNetworks",
+              "apiVersion": "2024-05-01",
+              "name": "[parameters('vnetName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "addressSpace": {
+                  "addressPrefixes": [
+                    "[parameters('vnetAddressPrefix')]"
+                  ]
+                },
+                "subnets": [
+                  {
+                    "name": "vllm-subnet",
+                    "properties": {
+                      "addressPrefixes": [
+                        "[parameters('subnetCaePrefix')]"
+                      ],
+                      "networkSecurityGroup": {
+                        "id": "[resourceId('Microsoft.Network/networkSecurityGroups', parameters('nsgMainName'))]"
+                      },
+                      "natGateway": {
+                        "id": "[resourceId('Microsoft.Network/natGateways', parameters('natGatewayName'))]"
+                      },
+                      "delegations": [
+                        {
+                          "name": "Microsoft.App/environments",
+                          "properties": {
+                            "serviceName": "Microsoft.App/environments"
+                          }
+                        }
+                      ],
+                      "serviceEndpoints": [
+                        {
+                          "service": "Microsoft.Storage",
+                          "locations": [
+                            "westus3",
+                            "eastus"
+                          ]
+                        }
+                      ],
+                      "privateEndpointNetworkPolicies": "Disabled",
+                      "privateLinkServiceNetworkPolicies": "Enabled",
+                      "defaultOutboundAccess": false
+                    }
+                  },
+                  {
+                    "name": "vllm-gpu-subnet",
+                    "properties": {
+                      "addressPrefixes": [
+                        "[parameters('subnetGpuPrefix')]"
+                      ],
+                      "networkSecurityGroup": {
+                        "id": "[resourceId('Microsoft.Network/networkSecurityGroups', parameters('nsgGpuName'))]"
+                      },
+                      "delegations": [
+                        {
+                          "name": "Microsoft.App/environments",
+                          "properties": {
+                            "serviceName": "Microsoft.App/environments"
+                          }
+                        }
+                      ],
+                      "serviceEndpoints": [
+                        {
+                          "service": "Microsoft.Storage",
+                          "locations": [
+                            "westus3",
+                            "eastus"
+                          ]
+                        }
+                      ],
+                      "privateEndpointNetworkPolicies": "Disabled",
+                      "privateLinkServiceNetworkPolicies": "Enabled",
+                      "defaultOutboundAccess": false
+                    }
+                  },
+                  {
+                    "name": "vllm-apim-subnet",
+                    "properties": {
+                      "addressPrefixes": [
+                        "[parameters('subnetApimPrefix')]"
+                      ],
+                      "networkSecurityGroup": {
+                        "id": "[resourceId('Microsoft.Network/networkSecurityGroups', parameters('nsgMainName'))]"
+                      },
+                      "natGateway": {
+                        "id": "[resourceId('Microsoft.Network/natGateways', parameters('natGatewayName'))]"
+                      },
+                      "delegations": [
+                        {
+                          "name": "Microsoft.Web/serverFarms",
+                          "properties": {
+                            "serviceName": "Microsoft.Web/serverFarms"
+                          }
+                        }
+                      ],
+                      "privateEndpointNetworkPolicies": "Disabled",
+                      "privateLinkServiceNetworkPolicies": "Enabled",
+                      "defaultOutboundAccess": false
+                    }
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/natGateways', parameters('natGatewayName'))]",
+                "[resourceId('Microsoft.Network/networkSecurityGroups', parameters('nsgGpuName'))]",
+                "[resourceId('Microsoft.Network/networkSecurityGroups', parameters('nsgMainName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "vnetId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+            },
+            "caeSubnetId": {
+              "type": "string",
+              "value": "[format('{0}/subnets/vllm-subnet', resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName')))]"
+            },
+            "gpuSubnetId": {
+              "type": "string",
+              "value": "[format('{0}/subnets/vllm-gpu-subnet', resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName')))]"
+            },
+            "apimSubnetId": {
+              "type": "string",
+              "value": "[format('{0}/subnets/vllm-apim-subnet', resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName')))]"
+            },
+            "natGatewayId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/natGateways', parameters('natGatewayName'))]"
+            },
+            "natGatewayPublicIp": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Network/publicIPAddresses', parameters('publicIpName')), '2024-05-01').ipAddress]"
+            },
+            "publicIpId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/publicIPAddresses', parameters('publicIpName'))]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "condition": "[parameters('deployStorage')]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "mod-storage",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "name": {
+            "value": "[parameters('storageAccountName')]"
+          },
+          "shareName": {
+            "value": "[parameters('hfCacheShareName')]"
+          },
+          "shareQuotaGiB": {
+            "value": "[parameters('hfCacheShareQuotaGiB')]"
+          },
+          "allowedSubnetIds": {
+            "value": [
+              "[reference(resourceId('Microsoft.Resources/deployments', 'mod-network'), '2025-04-01').outputs.caeSubnetId.value]",
+              "[reference(resourceId('Microsoft.Resources/deployments', 'mod-network'), '2025-04-01').outputs.gpuSubnetId.value]"
+            ]
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "2631384240805658087"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "object"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 24,
+              "metadata": {
+                "description": "Globally-unique storage account name (3-24, lowercase alphanumeric)."
+              }
+            },
+            "shareQuotaGiB": {
+              "type": "int",
+              "defaultValue": 500,
+              "minValue": 100,
+              "maxValue": 102400,
+              "metadata": {
+                "description": "File share quota in GiB (Premium file shares: min 100)."
+              }
+            },
+            "allowedSubnetIds": {
+              "type": "array",
+              "metadata": {
+                "description": "Subnet resource IDs that are allowed to reach the storage account (Microsoft.Storage service endpoint must be enabled on each)."
+              }
+            },
+            "shareName": {
+              "type": "string",
+              "defaultValue": "hfcache",
+              "metadata": {
+                "description": "NFS share name."
+              }
+            },
+            "rootSquash": {
+              "type": "string",
+              "defaultValue": "NoRootSquash",
+              "allowedValues": [
+                "NoRootSquash",
+                "RootSquash",
+                "AllSquash"
+              ],
+              "metadata": {
+                "description": "Root-squash policy on the NFS share."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Storage/storageAccounts",
+              "apiVersion": "2023-05-01",
+              "name": "[parameters('name')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "kind": "FileStorage",
+              "sku": {
+                "name": "Premium_LRS"
+              },
+              "properties": {
+                "minimumTlsVersion": "TLS1_2",
+                "supportsHttpsTrafficOnly": false,
+                "allowBlobPublicAccess": false,
+                "allowSharedKeyAccess": false,
+                "allowCrossTenantReplication": false,
+                "defaultToOAuthAuthentication": true,
+                "largeFileSharesState": "Enabled",
+                "publicNetworkAccess": "Enabled",
+                "networkAcls": {
+                  "copy": [
+                    {
+                      "name": "virtualNetworkRules",
+                      "count": "[length(parameters('allowedSubnetIds'))]",
+                      "input": {
+                        "id": "[parameters('allowedSubnetIds')[copyIndex('virtualNetworkRules')]]",
+                        "action": "Allow"
+                      }
+                    }
+                  ],
+                  "bypass": "AzureServices",
+                  "defaultAction": "Deny",
+                  "ipRules": []
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/fileServices",
+              "apiVersion": "2023-05-01",
+              "name": "[format('{0}/{1}', parameters('name'), 'default')]",
+              "properties": {
+                "shareDeleteRetentionPolicy": {
+                  "enabled": true,
+                  "days": 7
+                },
+                "protocolSettings": {
+                  "smb": {
+                    "multichannel": {
+                      "enabled": true
+                    }
+                  }
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('name'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/fileServices/shares",
+              "apiVersion": "2023-05-01",
+              "name": "[format('{0}/{1}/{2}', parameters('name'), 'default', parameters('shareName'))]",
+              "properties": {
+                "accessTier": "Premium",
+                "enabledProtocols": "NFS",
+                "rootSquash": "[parameters('rootSquash')]",
+                "shareQuota": "[parameters('shareQuotaGiB')]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts/fileServices', parameters('name'), 'default')]"
+              ]
+            }
+          ],
+          "outputs": {
+            "id": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Storage/storageAccounts', parameters('name'))]"
+            },
+            "name": {
+              "type": "string",
+              "value": "[parameters('name')]"
+            },
+            "fileEndpointHost": {
+              "type": "string",
+              "value": "[format('{0}.file.core.windows.net', parameters('name'))]"
+            },
+            "nfsSharePath": {
+              "type": "string",
+              "value": "[format('/{0}/{1}', parameters('name'), parameters('shareName'))]"
+            },
+            "shareName": {
+              "type": "string",
+              "value": "[parameters('shareName')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'mod-network')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "mod-acr",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "name": {
+            "value": "[parameters('acrName')]"
+          },
+          "sku": {
+            "value": "[parameters('acrSku')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "7690347551783262014"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "object"
+            },
+            "name": {
+              "type": "string"
+            },
+            "sku": {
+              "type": "string",
+              "defaultValue": "Premium"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.ContainerRegistry/registries",
+              "apiVersion": "2023-11-01-preview",
+              "name": "[parameters('name')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "sku": {
+                "name": "[parameters('sku')]"
+              },
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {
+                "adminUserEnabled": false,
+                "publicNetworkAccess": "Enabled",
+                "zoneRedundancy": "[if(equals(parameters('sku'), 'Premium'), 'Enabled', 'Disabled')]",
+                "networkRuleBypassOptions": "AzureServices",
+                "networkRuleSet": {
+                  "defaultAction": "Allow",
+                  "ipRules": []
+                },
+                "policies": {
+                  "retentionPolicy": {
+                    "days": 7,
+                    "status": "enabled"
+                  },
+                  "trustPolicy": {
+                    "type": "Notary",
+                    "status": "disabled"
+                  },
+                  "azureADAuthenticationAsArmPolicy": {
+                    "status": "enabled"
+                  }
+                }
+              }
+            }
+          ],
+          "outputs": {
+            "id": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.ContainerRegistry/registries', parameters('name'))]"
+            },
+            "name": {
+              "type": "string",
+              "value": "[parameters('name')]"
+            },
+            "loginServer": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ContainerRegistry/registries', parameters('name')), '2023-11-01-preview').loginServer]"
+            },
+            "principalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ContainerRegistry/registries', parameters('name')), '2023-11-01-preview', 'full').identity.principalId]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "mod-cae",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "name": {
+            "value": "[parameters('caeName')]"
+          },
+          "infrastructureSubnetId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-network'), '2025-04-01').outputs.caeSubnetId.value]"
+          },
+          "logAnalyticsCustomerId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-monitoring'), '2025-04-01').outputs.logAnalyticsCustomerId.value]"
+          },
+          "logAnalyticsSharedKey": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-monitoring'), '2025-04-01').outputs.logAnalyticsSharedKey.value]"
+          },
+          "appInsightsConnectionString": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-monitoring'), '2025-04-01').outputs.appInsightsConnectionString.value]"
+          },
+          "gpuWorkloadProfileName": {
+            "value": "[parameters('gpuWorkloadProfileName')]"
+          },
+          "gpuWorkloadProfileType": {
+            "value": "[parameters('gpuWorkloadProfileType')]"
+          },
+          "nfsServer": "[if(parameters('deployStorage'), createObject('value', reference(resourceId('Microsoft.Resources/deployments', 'mod-storage'), '2025-04-01').outputs.fileEndpointHost.value), createObject('value', parameters('nfsServer')))]",
+          "nfsShareName": "[if(parameters('deployStorage'), createObject('value', reference(resourceId('Microsoft.Resources/deployments', 'mod-storage'), '2025-04-01').outputs.nfsSharePath.value), createObject('value', parameters('nfsShareName')))]"
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "12109652231227331754"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "object"
+            },
+            "name": {
+              "type": "string"
+            },
+            "infrastructureSubnetId": {
+              "type": "string"
+            },
+            "logAnalyticsCustomerId": {
+              "type": "string"
+            },
+            "logAnalyticsSharedKey": {
+              "type": "securestring"
+            },
+            "appInsightsConnectionString": {
+              "type": "string"
+            },
+            "gpuWorkloadProfileName": {
+              "type": "string",
+              "defaultValue": "NC24-A100",
+              "metadata": {
+                "description": "GPU workload profile name. Empty string skips the GPU profile."
+              }
+            },
+            "gpuWorkloadProfileType": {
+              "type": "string",
+              "defaultValue": "Consumption-GPU-NC24-A100",
+              "metadata": {
+                "description": "GPU workload profile type. e.g. Consumption-GPU-NC24-A100."
+              }
+            },
+            "nfsServer": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "NFS Azure Files server (empty to skip)."
+              }
+            },
+            "nfsShareName": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "NFS share name (empty to skip)."
+              }
+            }
+          },
+          "variables": {
+            "baseProfile": {
+              "name": "Consumption",
+              "workloadProfileType": "Consumption"
+            },
+            "gpuProfile": {
+              "name": "[parameters('gpuWorkloadProfileName')]",
+              "workloadProfileType": "[parameters('gpuWorkloadProfileType')]"
+            },
+            "workloadProfiles": "[if(empty(parameters('gpuWorkloadProfileName')), createArray(variables('baseProfile')), createArray(variables('baseProfile'), variables('gpuProfile')))]"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.App/managedEnvironments",
+              "apiVersion": "2024-10-02-preview",
+              "name": "[parameters('name')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {
+                "appLogsConfiguration": {
+                  "destination": "log-analytics",
+                  "logAnalyticsConfiguration": {
+                    "customerId": "[parameters('logAnalyticsCustomerId')]",
+                    "sharedKey": "[parameters('logAnalyticsSharedKey')]",
+                    "dynamicJsonColumns": true
+                  }
+                },
+                "vnetConfiguration": {
+                  "infrastructureSubnetId": "[parameters('infrastructureSubnetId')]",
+                  "internal": false
+                },
+                "workloadProfiles": "[variables('workloadProfiles')]",
+                "openTelemetryConfiguration": {
+                  "logsConfiguration": {
+                    "destinations": [
+                      "appInsights"
+                    ]
+                  },
+                  "tracesConfiguration": {
+                    "destinations": [
+                      "appInsights"
+                    ],
+                    "includeDapr": false
+                  }
+                },
+                "appInsightsConfiguration": {
+                  "connectionString": "[parameters('appInsightsConnectionString')]"
+                },
+                "peerAuthentication": {
+                  "mtls": {
+                    "enabled": false
+                  }
+                },
+                "publicNetworkAccess": "Enabled",
+                "zoneRedundant": false
+              }
+            },
+            {
+              "condition": "[and(not(empty(parameters('nfsServer'))), not(empty(parameters('nfsShareName'))))]",
+              "type": "Microsoft.App/managedEnvironments/storages",
+              "apiVersion": "2024-10-02-preview",
+              "name": "[format('{0}/{1}', parameters('name'), 'hfcache')]",
+              "properties": {
+                "nfsAzureFile": {
+                  "server": "[parameters('nfsServer')]",
+                  "shareName": "[parameters('nfsShareName')]",
+                  "accessMode": "ReadWrite"
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.App/managedEnvironments', parameters('name'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "id": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.App/managedEnvironments', parameters('name'))]"
+            },
+            "name": {
+              "type": "string",
+              "value": "[parameters('name')]"
+            },
+            "defaultDomain": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.App/managedEnvironments', parameters('name')), '2024-10-02-preview').defaultDomain]"
+            },
+            "staticIp": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.App/managedEnvironments', parameters('name')), '2024-10-02-preview').staticIp]"
+            },
+            "principalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.App/managedEnvironments', parameters('name')), '2024-10-02-preview', 'full').identity.principalId]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'mod-monitoring')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-network')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-storage')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "mod-apps",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "caeName": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-cae'), '2025-04-01').outputs.name.value]"
+          },
+          "acrLoginServer": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.loginServer.value]"
+          },
+          "acrResourceId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.id.value]"
+          },
+          "appInsightsConnectionString": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-monitoring'), '2025-04-01').outputs.appInsightsConnectionString.value]"
+          },
+          "contentSafetyEndpoint": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-contentsafety'), '2025-04-01').outputs.endpoint.value]"
+          },
+          "contentSafetyResourceId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-contentsafety'), '2025-04-01').outputs.id.value]"
+          },
+          "ratioAiDevClientId": {
+            "value": "[parameters('ratioAiDevClientId')]"
+          },
+          "appName": {
+            "value": "[parameters('appName')]"
+          },
+          "appImage": "[if(empty(parameters('appImageTag')), createObject('value', parameters('appImage')), createObject('value', format('{0}/contentshield:{1}', reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.loginServer.value, parameters('appImageTag'))))]",
+          "appTargetPort": {
+            "value": "[parameters('appTargetPort')]"
+          },
+          "natGatewayPublicIp": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-network'), '2025-04-01').outputs.natGatewayPublicIp.value]"
+          },
+          "caeStaticIp": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-cae'), '2025-04-01').outputs.staticIp.value]"
+          },
+          "extraStage2AllowedIps": {
+            "value": "[parameters('extraStage2AllowedIps')]"
+          },
+          "slmModel": {
+            "value": "[parameters('slmModel')]"
+          },
+          "contentshieldV1MlDisabled": {
+            "value": "[parameters('contentshieldV1MlDisabled')]"
+          },
+          "deployStage2": {
+            "value": "[parameters('deployStage2')]"
+          },
+          "stage2AppName": {
+            "value": "[parameters('stage2AppName')]"
+          },
+          "stage2Image": "[if(empty(parameters('stage2ImageTag')), createObject('value', parameters('stage2Image')), createObject('value', format('{0}/{1}:{2}', reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.loginServer.value, variables('stage2RepoName'), parameters('stage2ImageTag'))))]",
+          "stage2TargetPort": {
+            "value": "[parameters('stage2TargetPort')]"
+          },
+          "gpuWorkloadProfileName": {
+            "value": "[parameters('gpuWorkloadProfileName')]"
+          },
+          "hfToken": {
+            "value": "[parameters('hfToken')]"
+          },
+          "nfsStorageMounted": {
+            "value": "[and(and(not(parameters('weightsInImage')), not(empty(if(parameters('deployStorage'), reference(resourceId('Microsoft.Resources/deployments', 'mod-storage'), '2025-04-01').outputs.fileEndpointHost.value, parameters('nfsServer'))))), not(empty(if(parameters('deployStorage'), reference(resourceId('Microsoft.Resources/deployments', 'mod-storage'), '2025-04-01').outputs.nfsSharePath.value, parameters('nfsShareName')))))]"
+          },
+          "storageAccountName": "[if(parameters('deployStorage'), createObject('value', reference(resourceId('Microsoft.Resources/deployments', 'mod-storage'), '2025-04-01').outputs.name.value), createObject('value', ''))]",
+          "hfCacheShareName": {
+            "value": "[parameters('hfCacheShareName')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "3389739604647109385"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "object"
+            },
+            "caeName": {
+              "type": "string"
+            },
+            "acrLoginServer": {
+              "type": "string"
+            },
+            "acrResourceId": {
+              "type": "string"
+            },
+            "appInsightsConnectionString": {
+              "type": "string"
+            },
+            "contentSafetyEndpoint": {
+              "type": "string"
+            },
+            "contentSafetyResourceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Content Safety account resource id — used to grant the main app MI Cognitive Services User on that account."
+              }
+            },
+            "ratioAiDevClientId": {
+              "type": "string"
+            },
+            "appName": {
+              "type": "string"
+            },
+            "appImage": {
+              "type": "string"
+            },
+            "appTargetPort": {
+              "type": "int"
+            },
+            "natGatewayPublicIp": {
+              "type": "string"
+            },
+            "caeStaticIp": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Static IP of the Container Apps Environment (used as a stage-2 ingress allowlist entry so the app can reach itself / sibling apps via internal ingress)."
+              }
+            },
+            "extraStage2AllowedIps": {
+              "type": "array",
+              "defaultValue": [],
+              "metadata": {
+                "description": "Optional list of extra IP CIDR ranges to allow on stage-2 ingress."
+              }
+            },
+            "slmModel": {
+              "type": "string",
+              "defaultValue": "google/gemma-4-31b-it",
+              "metadata": {
+                "description": "Model name the SLM serves — exposed to the main app via SLM_MODEL."
+              }
+            },
+            "contentshieldV1MlDisabled": {
+              "type": "string",
+              "defaultValue": "1",
+              "metadata": {
+                "description": "Feature flag CONTENTSHIELD_V1_ML_DISABLED on the main app. Set to \"0\" to re-enable the legacy ML path."
+              }
+            },
+            "appMinReplicas": {
+              "type": "int",
+              "defaultValue": 1,
+              "minValue": 0,
+              "maxValue": 10,
+              "metadata": {
+                "description": "Minimum replicas for the main app. Keep ≥1 to avoid scale-to-zero cold starts."
+              }
+            },
+            "stage2MinReplicas": {
+              "type": "int",
+              "defaultValue": 1,
+              "minValue": 0,
+              "maxValue": 5,
+              "metadata": {
+                "description": "Minimum replicas for the stage-2 GPU app. Keep ≥1 to keep a GPU node warm and avoid 5-15 min cold starts on a new replica."
+              }
+            },
+            "stage2MaxReplicas": {
+              "type": "int",
+              "defaultValue": 3,
+              "minValue": 1,
+              "maxValue": 10,
+              "metadata": {
+                "description": "Maximum replicas for the stage-2 GPU app."
+              }
+            },
+            "deployStage2": {
+              "type": "bool"
+            },
+            "stage2AppName": {
+              "type": "string"
+            },
+            "stage2Image": {
+              "type": "string"
+            },
+            "stage2TargetPort": {
+              "type": "int"
+            },
+            "gpuWorkloadProfileName": {
+              "type": "string"
+            },
+            "hfToken": {
+              "type": "securestring",
+              "defaultValue": ""
+            },
+            "nfsStorageMounted": {
+              "type": "bool"
+            },
+            "storageAccountName": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Storage account name. Used to compute the mount path /mount/<accountName>/<share>."
+              }
+            },
+            "hfCacheShareName": {
+              "type": "string",
+              "defaultValue": "hfcache",
+              "metadata": {
+                "description": "NFS share name used as the mount sub-path (also the volume name in CAE storage)."
+              }
+            }
+          },
+          "variables": {
+            "copy": [
+              {
+                "name": "stage2ExtraRules",
+                "count": "[length(parameters('extraStage2AllowedIps'))]",
+                "input": {
+                  "name": "[format('AllowExtra{0}', copyIndex('stage2ExtraRules'))]",
+                  "action": "Allow",
+                  "ipAddressRange": "[parameters('extraStage2AllowedIps')[copyIndex('stage2ExtraRules')]]"
+                }
+              }
+            ],
+            "appRevisionSuffix": "[format('r{0}', take(uniqueString(parameters('appImage')), 8))]",
+            "stage2RevisionSuffix": "[format('r{0}', take(uniqueString(parameters('stage2Image')), 8))]",
+            "acrPullRoleId": "7f951dda-4ed3-4680-a7ca-43fe172d538d",
+            "cogServicesUserRoleId": "a97b65f3-24c7-4388-baec-2e87135dc908",
+            "stage2Secrets": "[if(empty(parameters('hfToken')), createArray(), createArray(createObject('name', 'hf-token', 'value', parameters('hfToken'))))]",
+            "hfCacheMountPath": "[if(empty(parameters('storageAccountName')), '/mnt/hfcache', format('/mount/{0}/{1}', parameters('storageAccountName'), parameters('hfCacheShareName')))]",
+            "stage2EnvBase": "[concat(createArray(createObject('name', 'MODEL_NAME', 'value', parameters('slmModel')), createObject('name', 'MAX_MODEL_LEN', 'value', '20000'), createObject('name', 'GPU_MEMORY_UTILIZATION', 'value', '0.9'), createObject('name', 'LANGUAGE_MODEL_ONLY', 'value', 'true'), createObject('name', 'EXTRA_ENGINE_ARGS', 'value', '--enable-prefix-caching'), createObject('name', 'HF_HOME', 'value', variables('hfCacheMountPath')), createObject('name', 'ENABLE_THINKING', 'value', 'false'), createObject('name', 'CACHE_ENABLED', 'value', 'true'), createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'value', parameters('appInsightsConnectionString'))), createArray())]",
+            "stage2EnvWithHf": "[if(empty(parameters('hfToken')), variables('stage2EnvBase'), concat(createArray(createObject('name', 'HF_TOKEN', 'secretRef', 'hf-token')), variables('stage2EnvBase')))]",
+            "stage2VolumeMounts": "[if(parameters('nfsStorageMounted'), createArray(createObject('mountPath', variables('hfCacheMountPath'), 'volumeName', 'hfcache')), createArray())]",
+            "stage2Volumes": "[if(parameters('nfsStorageMounted'), createArray(createObject('name', 'hfcache', 'storageName', 'hfcache', 'storageType', 'NfsAzureFile')), createArray())]",
+            "stage2BaseIpRules": [
+              {
+                "name": "AllowAPIMNatGateway",
+                "action": "Allow",
+                "ipAddressRange": "[format('{0}/32', parameters('natGatewayPublicIp'))]"
+              }
+            ],
+            "stage2CaeRule": "[if(empty(parameters('caeStaticIp')), createArray(), createArray(createObject('name', 'AllowACAEnvStatic', 'description', 'Allow same ACA environment static IP', 'action', 'Allow', 'ipAddressRange', format('{0}/32', parameters('caeStaticIp')))))]",
+            "stage2IpRules": "[concat(variables('stage2BaseIpRules'), variables('stage2CaeRule'), variables('stage2ExtraRules'))]"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(parameters('acrResourceId'), parameters('caeName'), variables('acrPullRoleId'))]",
+              "properties": {
+                "principalId": "[reference(resourceId('Microsoft.App/managedEnvironments', parameters('caeName')), '2024-10-02-preview', 'full').identity.principalId]",
+                "principalType": "ServicePrincipal",
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('acrPullRoleId'))]"
+              }
+            },
+            {
+              "type": "Microsoft.App/containerApps",
+              "apiVersion": "2024-10-02-preview",
+              "name": "[parameters('appName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {
+                "environmentId": "[resourceId('Microsoft.App/managedEnvironments', parameters('caeName'))]",
+                "workloadProfileName": "Consumption",
+                "configuration": {
+                  "activeRevisionsMode": "Single",
+                  "ingress": {
+                    "external": true,
+                    "targetPort": "[parameters('appTargetPort')]",
+                    "transport": "Auto",
+                    "allowInsecure": false,
+                    "clientCertificateMode": "Ignore",
+                    "ipSecurityRestrictions": [
+                      {
+                        "name": "AllowAPIMNatGateway",
+                        "action": "Allow",
+                        "ipAddressRange": "[format('{0}/32', parameters('natGatewayPublicIp'))]"
+                      }
+                    ],
+                    "traffic": [
+                      {
+                        "latestRevision": true,
+                        "weight": 100
+                      }
+                    ]
+                  },
+                  "registries": [
+                    {
+                      "server": "[parameters('acrLoginServer')]",
+                      "identity": "system-environment"
+                    }
+                  ],
+                  "maxInactiveRevisions": 100
+                },
+                "template": {
+                  "revisionSuffix": "[variables('appRevisionSuffix')]",
+                  "containers": [
+                    {
+                      "name": "[parameters('appName')]",
+                      "image": "[parameters('appImage')]",
+                      "resources": {
+                        "cpu": "[json('0.5')]",
+                        "memory": "1Gi",
+                        "ephemeralStorage": "2Gi"
+                      },
+                      "env": "[concat(createArray(createObject('name', 'CONTENT_SAFETY_ENDPOINT', 'value', parameters('contentSafetyEndpoint')), createObject('name', 'CONTENT_SAFETY_API_VERSION', 'value', '2024-09-01'), createObject('name', 'SLM_ENDPOINT', 'value', format('http://{0}', parameters('stage2AppName'))), createObject('name', 'SLM_PATH', 'value', '/classify'), createObject('name', 'SLM_MODEL', 'value', parameters('slmModel')), createObject('name', 'SLM_TIMEOUT_SECONDS', 'value', '60'), createObject('name', 'CONTENTSHIELD_V1_ML_DISABLED', 'value', parameters('contentshieldV1MlDisabled')), createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'value', parameters('appInsightsConnectionString')), createObject('name', 'RATIO_AI_DEV_CLIENT_ID', 'value', parameters('ratioAiDevClientId'))), createArray())]",
+                      "probes": [
+                        {
+                          "type": "Liveness",
+                          "httpGet": {
+                            "path": "/health",
+                            "port": "[parameters('appTargetPort')]",
+                            "scheme": "HTTP"
+                          },
+                          "initialDelaySeconds": 30,
+                          "periodSeconds": 20,
+                          "timeoutSeconds": 5,
+                          "successThreshold": 1,
+                          "failureThreshold": 3
+                        },
+                        {
+                          "type": "Readiness",
+                          "httpGet": {
+                            "path": "/health",
+                            "port": "[parameters('appTargetPort')]",
+                            "scheme": "HTTP"
+                          },
+                          "initialDelaySeconds": 5,
+                          "periodSeconds": 10,
+                          "timeoutSeconds": 5,
+                          "successThreshold": 1,
+                          "failureThreshold": 3
+                        },
+                        {
+                          "type": "Startup",
+                          "httpGet": {
+                            "path": "/health",
+                            "port": "[parameters('appTargetPort')]",
+                            "scheme": "HTTP"
+                          },
+                          "initialDelaySeconds": 10,
+                          "periodSeconds": 10,
+                          "timeoutSeconds": 5,
+                          "successThreshold": 1,
+                          "failureThreshold": 3
+                        }
+                      ]
+                    }
+                  ],
+                  "scale": {
+                    "minReplicas": "[parameters('appMinReplicas')]",
+                    "maxReplicas": 1,
+                    "cooldownPeriod": 300,
+                    "pollingInterval": 30,
+                    "rules": [
+                      {
+                        "name": "http-scaler",
+                        "http": {
+                          "metadata": {
+                            "concurrentRequests": "10"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Authorization/roleAssignments', guid(parameters('acrResourceId'), parameters('caeName'), variables('acrPullRoleId')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.CognitiveServices/accounts', last(split(parameters('contentSafetyResourceId'), '/')))]",
+              "name": "[guid(parameters('contentSafetyResourceId'), parameters('appName'), variables('cogServicesUserRoleId'))]",
+              "properties": {
+                "principalId": "[reference(resourceId('Microsoft.App/containerApps', parameters('appName')), '2024-10-02-preview', 'full').identity.principalId]",
+                "principalType": "ServicePrincipal",
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('cogServicesUserRoleId'))]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.App/containerApps', parameters('appName'))]"
+              ]
+            },
+            {
+              "condition": "[parameters('deployStage2')]",
+              "type": "Microsoft.App/containerApps",
+              "apiVersion": "2024-10-02-preview",
+              "name": "[parameters('stage2AppName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {
+                "environmentId": "[resourceId('Microsoft.App/managedEnvironments', parameters('caeName'))]",
+                "workloadProfileName": "[parameters('gpuWorkloadProfileName')]",
+                "configuration": {
+                  "activeRevisionsMode": "Single",
+                  "ingress": {
+                    "external": false,
+                    "targetPort": "[parameters('stage2TargetPort')]",
+                    "transport": "Auto",
+                    "allowInsecure": false,
+                    "ipSecurityRestrictions": "[variables('stage2IpRules')]",
+                    "traffic": [
+                      {
+                        "latestRevision": true,
+                        "weight": 100
+                      }
+                    ]
+                  },
+                  "registries": [
+                    {
+                      "server": "[parameters('acrLoginServer')]",
+                      "identity": "system-environment"
+                    }
+                  ],
+                  "secrets": "[variables('stage2Secrets')]",
+                  "maxInactiveRevisions": 100
+                },
+                "template": {
+                  "revisionSuffix": "[variables('stage2RevisionSuffix')]",
+                  "containers": [
+                    {
+                      "name": "[parameters('stage2AppName')]",
+                      "image": "[parameters('stage2Image')]",
+                      "resources": {
+                        "cpu": "[json('6.0')]",
+                        "memory": "12Gi"
+                      },
+                      "env": "[variables('stage2EnvWithHf')]",
+                      "probes": [
+                        {
+                          "type": "Liveness",
+                          "tcpSocket": {
+                            "port": "[parameters('stage2TargetPort')]"
+                          },
+                          "periodSeconds": 10,
+                          "timeoutSeconds": 5,
+                          "successThreshold": 1,
+                          "failureThreshold": 3
+                        },
+                        {
+                          "type": "Readiness",
+                          "tcpSocket": {
+                            "port": "[parameters('stage2TargetPort')]"
+                          },
+                          "periodSeconds": 5,
+                          "timeoutSeconds": 5,
+                          "successThreshold": 1,
+                          "failureThreshold": 48
+                        },
+                        {
+                          "type": "Startup",
+                          "tcpSocket": {
+                            "port": "[parameters('stage2TargetPort')]"
+                          },
+                          "initialDelaySeconds": 1,
+                          "periodSeconds": 1,
+                          "timeoutSeconds": 3,
+                          "successThreshold": 1,
+                          "failureThreshold": 600
+                        }
+                      ],
+                      "volumeMounts": "[variables('stage2VolumeMounts')]"
+                    }
+                  ],
+                  "scale": {
+                    "minReplicas": "[parameters('stage2MinReplicas')]",
+                    "maxReplicas": "[parameters('stage2MaxReplicas')]",
+                    "cooldownPeriod": 600,
+                    "pollingInterval": 15,
+                    "rules": [
+                      {
+                        "name": "http-scaler",
+                        "http": {
+                          "metadata": {
+                            "concurrentRequests": "1"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  "volumes": "[variables('stage2Volumes')]",
+                  "terminationGracePeriodSeconds": 60
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Authorization/roleAssignments', guid(parameters('acrResourceId'), parameters('caeName'), variables('acrPullRoleId')))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "appFqdn": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.App/containerApps', parameters('appName')), '2024-10-02-preview').configuration.ingress.fqdn]"
+            },
+            "appPrincipalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.App/containerApps', parameters('appName')), '2024-10-02-preview', 'full').identity.principalId]"
+            },
+            "stage2Fqdn": {
+              "type": "string",
+              "value": "[if(parameters('deployStage2'), reference(resourceId('Microsoft.App/containerApps', parameters('stage2AppName')), '2024-10-02-preview').configuration.ingress.fqdn, '')]"
+            },
+            "stage2PrincipalId": {
+              "type": "string",
+              "value": "[if(parameters('deployStage2'), reference(resourceId('Microsoft.App/containerApps', parameters('stage2AppName')), '2024-10-02-preview', 'full').identity.principalId, '')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'mod-acr')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-cae')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-contentsafety')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-monitoring')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-network')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-storage')]"
+      ]
+    },
+    {
+      "condition": "[and(and(and(parameters('deployHfPrewarmJob'), parameters('deployStorage')), parameters('deployStage2')), not(parameters('weightsInImage')))]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "mod-hfprewarm",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "caeName": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-cae'), '2025-04-01').outputs.name.value]"
+          },
+          "jobName": {
+            "value": "[parameters('hfPrewarmJobName')]"
+          },
+          "model": {
+            "value": "[parameters('slmModel')]"
+          },
+          "storageAccountName": "[if(parameters('deployStorage'), createObject('value', reference(resourceId('Microsoft.Resources/deployments', 'mod-storage'), '2025-04-01').outputs.name.value), createObject('value', ''))]",
+          "hfCacheShareName": {
+            "value": "[parameters('hfCacheShareName')]"
+          },
+          "hfToken": {
+            "value": "[parameters('hfToken')]"
+          },
+          "appInsightsConnectionString": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-monitoring'), '2025-04-01').outputs.appInsightsConnectionString.value]"
+          },
+          "modelSource": {
+            "value": "[parameters('modelSource')]"
+          },
+          "weightsAcrName": {
+            "value": "[parameters('acrName')]"
+          },
+          "weightsAcrLoginServer": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.loginServer.value]"
+          },
+          "weightsRepository": {
+            "value": "[parameters('weightsRepository')]"
+          },
+          "weightsTag": "[if(empty(parameters('weightsTag')), createObject('value', parameters('stage2ImageTag')), createObject('value', parameters('weightsTag')))]"
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "14118838182190152686"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "object"
+            },
+            "caeName": {
+              "type": "string"
+            },
+            "jobName": {
+              "type": "string",
+              "defaultValue": "job-hf-prewarm"
+            },
+            "model": {
+              "type": "string",
+              "metadata": {
+                "description": "Model id to pre-download into the HF cache (e.g. google/gemma-4-31b-it)."
+              }
+            },
+            "storageAccountName": {
+              "type": "string",
+              "metadata": {
+                "description": "Storage account name. Used to compute the mount path /mount/<accountName>/<share> — must match what stage-2 uses."
+              }
+            },
+            "hfCacheShareName": {
+              "type": "string",
+              "defaultValue": "hfcache",
+              "metadata": {
+                "description": "NFS share name registered on the CAE as a storage definition (must already exist as a managedEnvironments/storages child)."
+              }
+            },
+            "caeStorageName": {
+              "type": "string",
+              "defaultValue": "hfcache",
+              "metadata": {
+                "description": "CAE storage definition name to bind. Defaults to \"hfcache\" (the one defined in containerAppsEnv.bicep)."
+              }
+            },
+            "hfToken": {
+              "type": "securestring",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Optional HF token for gated/private models."
+              }
+            },
+            "modelSource": {
+              "type": "string",
+              "defaultValue": "hf-hub",
+              "allowedValues": [
+                "hf-hub",
+                "acr-oras"
+              ],
+              "metadata": {
+                "description": "Source of the model weights. \"hf-hub\" downloads from huggingface.co (back-compat default); \"acr-oras\" pulls the OCI weights artifact from a customer ACR via the job's managed identity."
+              }
+            },
+            "weightsAcrName": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "ACR resource name holding the weights OCI artifact (required when modelSource = \"acr-oras\"). Typically the customer ACR."
+              }
+            },
+            "weightsAcrLoginServer": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Login server FQDN of the weights ACR, e.g. contentshieldacrXXX.azurecr.io (required when modelSource = \"acr-oras\")."
+              }
+            },
+            "weightsRepository": {
+              "type": "string",
+              "defaultValue": "contentshield-stage2-weights",
+              "metadata": {
+                "description": "Repository name of the weights artifact in the customer ACR."
+              }
+            },
+            "weightsTag": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Tag of the weights artifact to pull (required when modelSource = \"acr-oras\"). Convention: same semver as the stage-2 image tag."
+              }
+            },
+            "appInsightsConnectionString": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "App Insights connection string — surfaced to the job for traceability."
+              }
+            },
+            "prewarmImage": {
+              "type": "string",
+              "defaultValue": "mcr.microsoft.com/azurelinux/base/python:3.12",
+              "metadata": {
+                "description": "Image used to run the download. MS-hosted to avoid Docker Hub rate limits."
+              }
+            },
+            "replicaTimeoutSeconds": {
+              "type": "int",
+              "defaultValue": 3600,
+              "minValue": 300,
+              "maxValue": 86400,
+              "metadata": {
+                "description": "Job replica timeout in seconds. Default 3600 (1h) — generous for cold cache + large models."
+              }
+            }
+          },
+          "variables": {
+            "hfCacheMountPath": "[format('/mount/{0}/{1}', parameters('storageAccountName'), parameters('hfCacheShareName'))]",
+            "isAcrOras": "[equals(parameters('modelSource'), 'acr-oras')]",
+            "jobSecrets": "[if(empty(parameters('hfToken')), createArray(), createArray(createObject('name', 'hf-token', 'value', parameters('hfToken'))))]",
+            "jobEnvBase": [
+              {
+                "name": "MODEL_SOURCE",
+                "value": "[parameters('modelSource')]"
+              },
+              {
+                "name": "MODEL_NAME",
+                "value": "[parameters('model')]"
+              },
+              {
+                "name": "HF_HOME",
+                "value": "[variables('hfCacheMountPath')]"
+              },
+              {
+                "name": "HF_HUB_ENABLE_HF_TRANSFER",
+                "value": "1"
+              },
+              {
+                "name": "WEIGHTS_ACR_FQDN",
+                "value": "[parameters('weightsAcrLoginServer')]"
+              },
+              {
+                "name": "WEIGHTS_REPOSITORY",
+                "value": "[parameters('weightsRepository')]"
+              },
+              {
+                "name": "WEIGHTS_TAG",
+                "value": "[parameters('weightsTag')]"
+              },
+              {
+                "name": "APPLICATIONINSIGHTS_CONNECTION_STRING",
+                "value": "[parameters('appInsightsConnectionString')]"
+              }
+            ],
+            "jobEnv": "[if(empty(parameters('hfToken')), variables('jobEnvBase'), concat(createArray(createObject('name', 'HF_TOKEN', 'secretRef', 'hf-token')), variables('jobEnvBase')))]",
+            "downloadScript": "set -euo pipefail\r\necho \"[prewarm] source=$MODEL_SOURCE  model=$MODEL_NAME  cache=$HF_HOME\"\r\nmkdir -p \"$HF_HOME\"\r\ndf -h \"$HF_HOME\" || true\r\n\r\ncase \"$MODEL_SOURCE\" in\r\n  hf-hub)\r\n    echo \"[prewarm] installing huggingface_hub + hf_transfer...\"\r\n    python -m pip install --quiet --no-cache-dir --disable-pip-version-check \\\r\n        'huggingface_hub[cli]>=0.24' 'hf_transfer>=0.1.6'\r\n    echo \"[prewarm] downloading from HF Hub...\"\r\n    time huggingface-cli download \"$MODEL_NAME\" --cache-dir \"$HF_HOME\" --quiet\r\n    ;;\r\n  acr-oras)\r\n    : \"${WEIGHTS_ACR_FQDN:?WEIGHTS_ACR_FQDN must be set for acr-oras mode}\"\r\n    : \"${WEIGHTS_REPOSITORY:?WEIGHTS_REPOSITORY must be set for acr-oras mode}\"\r\n    : \"${WEIGHTS_TAG:?WEIGHTS_TAG must be set for acr-oras mode}\"\r\n    echo \"[prewarm] target artifact: $WEIGHTS_ACR_FQDN/$WEIGHTS_REPOSITORY:$WEIGHTS_TAG\"\r\n\r\n    # 1) Install oras (pinned, single binary).\r\n    ORAS_VERSION=1.2.3\r\n    echo \"[prewarm] installing oras $ORAS_VERSION...\"\r\n    tdnf install -y -q tar gzip curl ca-certificates >/dev/null 2>&1 || \\\r\n      (apt-get update -qq && apt-get install -y -qq tar gzip curl ca-certificates >/dev/null) || true\r\n    curl -fsSL -o /tmp/oras.tgz \\\r\n      \"https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz\"\r\n    tar -xzf /tmp/oras.tgz -C /usr/local/bin oras\r\n    chmod +x /usr/local/bin/oras\r\n    oras version\r\n\r\n    # 2) Exchange the job\\'s managed identity (via IMDS) for an ACR access token.\r\n    echo \"[prewarm] authenticating to $WEIGHTS_ACR_FQDN via managed identity...\"\r\n    AAD_TOKEN=$(curl -fsSL -H \"Metadata:true\" \\\r\n      \"http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://${WEIGHTS_ACR_FQDN}/\" \\\r\n      | python3 -c \"import sys,json; print(json.load(sys.stdin)['access_token'])\")\r\n    REFRESH=$(curl -fsSL -X POST \"https://$WEIGHTS_ACR_FQDN/oauth2/exchange\" \\\r\n      -d \"grant_type=access_token&service=$WEIGHTS_ACR_FQDN&access_token=$AAD_TOKEN\" \\\r\n      | python3 -c \"import sys,json; print(json.load(sys.stdin)['refresh_token'])\")\r\n    ACCESS=$(curl -fsSL -X POST \"https://$WEIGHTS_ACR_FQDN/oauth2/token\" \\\r\n      -d \"grant_type=refresh_token&service=$WEIGHTS_ACR_FQDN&scope=repository:${WEIGHTS_REPOSITORY}:pull&refresh_token=${REFRESH}\" \\\r\n      | python3 -c \"import sys,json; print(json.load(sys.stdin)['access_token'])\")\r\n    printf '%s' \"$ACCESS\" | oras login \"$WEIGHTS_ACR_FQDN\" \\\r\n      -u '00000000-0000-0000-0000-000000000000' --password-stdin\r\n\r\n    # 3) Pull the artifact (one or more tarball layers) into a staging dir.\r\n    STAGE=/tmp/weights\r\n    rm -rf \"$STAGE\" && mkdir -p \"$STAGE\"\r\n    echo \"[prewarm] pulling artifact...\"\r\n    time oras pull \"$WEIGHTS_ACR_FQDN/${WEIGHTS_REPOSITORY}:${WEIGHTS_TAG}\" -o \"$STAGE\"\r\n\r\n    # 4) Untar each layer into HF_HOME. Supports .tar.gz, .tar.zst, .tar.\r\n    echo \"[prewarm] extracting to $HF_HOME ...\"\r\n    shopt -s nullglob\r\n    for f in \"$STAGE\"/*.tar.gz \"$STAGE\"/*.tgz; do\r\n      echo \"  + $f\"\r\n      tar -xzf \"$f\" -C \"$HF_HOME\"\r\n    done\r\n    for f in \"$STAGE\"/*.tar.zst; do\r\n      echo \"  + $f (zstd)\"\r\n      # Mariner has zstd in tdnf; install on demand.\r\n      command -v zstd >/dev/null 2>&1 || tdnf install -y -q zstd >/dev/null 2>&1 || \\\r\n        apt-get install -y -qq zstd >/dev/null 2>&1 || true\r\n      tar --use-compress-program=unzstd -xf \"$f\" -C \"$HF_HOME\"\r\n    done\r\n    for f in \"$STAGE\"/*.tar; do\r\n      echo \"  + $f\"\r\n      tar -xf \"$f\" -C \"$HF_HOME\"\r\n    done\r\n    rm -rf \"$STAGE\"\r\n    ;;\r\n  *)\r\n    echo \"[prewarm] ERROR: unknown MODEL_SOURCE=$MODEL_SOURCE\" >&2\r\n    exit 2\r\n    ;;\r\nesac\r\n\r\necho \"[prewarm] done. footprint:\"\r\ndu -sh \"$HF_HOME\" || true\r\n"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.App/jobs",
+              "apiVersion": "2024-10-02-preview",
+              "name": "[parameters('jobName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {
+                "environmentId": "[resourceId('Microsoft.App/managedEnvironments', parameters('caeName'))]",
+                "workloadProfileName": "Consumption",
+                "configuration": {
+                  "triggerType": "Manual",
+                  "replicaTimeout": "[parameters('replicaTimeoutSeconds')]",
+                  "replicaRetryLimit": 1,
+                  "manualTriggerConfig": {
+                    "parallelism": 1,
+                    "replicaCompletionCount": 1
+                  },
+                  "secrets": "[variables('jobSecrets')]"
+                },
+                "template": {
+                  "containers": [
+                    {
+                      "name": "prewarm",
+                      "image": "[parameters('prewarmImage')]",
+                      "command": [
+                        "/bin/bash",
+                        "-c",
+                        "[variables('downloadScript')]"
+                      ],
+                      "env": "[variables('jobEnv')]",
+                      "resources": {
+                        "cpu": "[json('2.0')]",
+                        "memory": "4Gi"
+                      },
+                      "volumeMounts": [
+                        {
+                          "mountPath": "[variables('hfCacheMountPath')]",
+                          "volumeName": "hfcache"
+                        }
+                      ]
+                    }
+                  ],
+                  "volumes": [
+                    {
+                      "name": "hfcache",
+                      "storageName": "[parameters('caeStorageName')]",
+                      "storageType": "NfsAzureFile"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "condition": "[and(variables('isAcrOras'), not(empty(parameters('weightsAcrName'))))]",
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.ContainerRegistry/registries', parameters('weightsAcrName'))]",
+              "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', parameters('weightsAcrName')), resourceId('Microsoft.App/jobs', parameters('jobName')), '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
+                "principalId": "[reference(resourceId('Microsoft.App/jobs', parameters('jobName')), '2024-10-02-preview', 'full').identity.principalId]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.App/jobs', parameters('jobName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "jobName": {
+              "type": "string",
+              "value": "[parameters('jobName')]"
+            },
+            "jobId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.App/jobs', parameters('jobName'))]"
+            },
+            "mountPath": {
+              "type": "string",
+              "value": "[variables('hfCacheMountPath')]"
+            },
+            "modelSource": {
+              "type": "string",
+              "value": "[parameters('modelSource')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'mod-acr')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-apps')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-cae')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-monitoring')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-storage')]"
+      ]
+    },
+    {
+      "condition": "[parameters('deployApim')]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "mod-apim",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "name": {
+            "value": "[parameters('apimName')]"
+          },
+          "sku": {
+            "value": "[parameters('apimSku')]"
+          },
+          "capacity": {
+            "value": "[parameters('apimCapacity')]"
+          },
+          "publisherEmail": {
+            "value": "[parameters('apimPublisherEmail')]"
+          },
+          "publisherName": {
+            "value": "[parameters('apimPublisherName')]"
+          },
+          "subnetId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-network'), '2025-04-01').outputs.apimSubnetId.value]"
+          },
+          "caeDefaultDomain": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-cae'), '2025-04-01').outputs.defaultDomain.value]"
+          },
+          "backendAppName": {
+            "value": "[parameters('appName')]"
+          },
+          "aadTenantId": {
+            "value": "[parameters('aadTenantId')]"
+          },
+          "aadApiAudience": "[if(empty(parameters('aadApiAudience')), createObject('value', parameters('ratioAiDevClientId')), createObject('value', parameters('aadApiAudience')))]",
+          "aadApiClientId": "[if(empty(parameters('aadApiClientId')), createObject('value', parameters('ratioAiDevClientId')), createObject('value', parameters('aadApiClientId')))]",
+          "appInsightsId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-monitoring'), '2025-04-01').outputs.appInsightsId.value]"
+          },
+          "appInsightsInstrumentationKey": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-monitoring'), '2025-04-01').outputs.appInsightsInstrumentationKey.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "14720963747179423814"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "object"
+            },
+            "name": {
+              "type": "string"
+            },
+            "sku": {
+              "type": "string",
+              "defaultValue": "StandardV2"
+            },
+            "capacity": {
+              "type": "int",
+              "defaultValue": 1
+            },
+            "publisherEmail": {
+              "type": "string"
+            },
+            "publisherName": {
+              "type": "string"
+            },
+            "subnetId": {
+              "type": "string"
+            },
+            "caeDefaultDomain": {
+              "type": "string",
+              "metadata": {
+                "description": "CAE default domain (e.g. blacksea-a90e1d7c.westus3.azurecontainerapps.io) — used to compute the backend FQDN."
+              }
+            },
+            "backendAppName": {
+              "type": "string",
+              "defaultValue": "ca-ratio-contentshield",
+              "metadata": {
+                "description": "Container app name that serves the API (used to construct the backend URL https://<appName>.<caeDefaultDomain>)."
+              }
+            },
+            "aadTenantId": {
+              "type": "string",
+              "metadata": {
+                "description": "AAD tenant id used by the validate-azure-ad-token policy."
+              }
+            },
+            "aadApiAudience": {
+              "type": "string",
+              "metadata": {
+                "description": "AAD audience claim that the API validates incoming bearer tokens against. Usually the API app registration client id."
+              }
+            },
+            "aadApiClientId": {
+              "type": "string",
+              "metadata": {
+                "description": "AAD client (application) id of the API. Stored as a named value for reference in policies."
+              }
+            },
+            "appInsightsId": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Application Insights resource id to wire as an APIM logger. Empty string skips logger + diagnostics."
+              }
+            },
+            "appInsightsInstrumentationKey": {
+              "type": "securestring",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Application Insights instrumentation key (used as the logger credential)."
+              }
+            },
+            "apiPath": {
+              "type": "string",
+              "defaultValue": "contentshield",
+              "metadata": {
+                "description": "Path the API is exposed under (gateway URL becomes https://<apim>.azure-api.net/<apiPath>)."
+              }
+            },
+            "apiId": {
+              "type": "string",
+              "defaultValue": "ratio-contentshield-api",
+              "metadata": {
+                "description": "API id (unique within APIM)."
+              }
+            },
+            "apiDisplayName": {
+              "type": "string",
+              "defaultValue": "RATIO ContentShield API",
+              "metadata": {
+                "description": "API display name shown in the developer portal."
+              }
+            },
+            "backendId": {
+              "type": "string",
+              "defaultValue": "be-contentshield",
+              "metadata": {
+                "description": "Backend id (unique within APIM)."
+              }
+            }
+          },
+          "variables": {
+            "backendUrl": "[format('https://{0}.{1}', parameters('backendAppName'), parameters('caeDefaultDomain'))]",
+            "apiPolicyXml": "[replace('<policies>\r\n  <inbound>\r\n    <base />\r\n    <validate-azure-ad-token tenant-id=\"{{aad-tenant-id}}\" header-name=\"Authorization\" failed-validation-httpcode=\"401\" failed-validation-error-message=\"Unauthorized\">\r\n      <audiences>\r\n        <audience>{{aad-api-audience}}</audience>\r\n      </audiences>\r\n    </validate-azure-ad-token>\r\n    <rate-limit calls=\"1000\" renewal-period=\"60\" remaining-calls-header-name=\"X-RateLimit-Remaining\" total-calls-header-name=\"X-RateLimit-Limit\" />\r\n    <choose>\r\n      <when condition=\"@(context.Request.Headers.ContainsKey(&quot;x-correlation-id&quot;))\">\r\n        <set-header name=\"x-correlation-id\" exists-action=\"override\">\r\n          <value>@(context.Request.Headers.GetValueOrDefault(\"x-correlation-id\",\"\"))</value>\r\n        </set-header>\r\n      </when>\r\n      <otherwise>\r\n        <set-header name=\"x-correlation-id\" exists-action=\"override\">\r\n          <value>@(context.RequestId.ToString())</value>\r\n        </set-header>\r\n      </otherwise>\r\n    </choose>\r\n    <set-backend-service backend-id=\"__BACKEND_ID__\" />\r\n    <set-header name=\"Authorization\" exists-action=\"delete\" />\r\n  </inbound>\r\n  <backend>\r\n    <forward-request timeout=\"30\" />\r\n  </backend>\r\n  <outbound>\r\n    <base />\r\n  </outbound>\r\n  <on-error>\r\n    <base />\r\n  </on-error>\r\n</policies>', '__BACKEND_ID__', parameters('backendId'))]"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.ApiManagement/service",
+              "apiVersion": "2023-09-01-preview",
+              "name": "[parameters('name')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "sku": {
+                "name": "[parameters('sku')]",
+                "capacity": "[parameters('capacity')]"
+              },
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {
+                "publisherEmail": "[parameters('publisherEmail')]",
+                "publisherName": "[parameters('publisherName')]",
+                "virtualNetworkType": "External",
+                "virtualNetworkConfiguration": {
+                  "subnetResourceId": "[parameters('subnetId')]"
+                },
+                "publicNetworkAccess": "Enabled",
+                "natGatewayState": "Enabled",
+                "customProperties": {
+                  "Microsoft.WindowsAzure.ApiManagement.Gateway.Security.Protocols.Tls10": "False",
+                  "Microsoft.WindowsAzure.ApiManagement.Gateway.Security.Protocols.Tls11": "False",
+                  "Microsoft.WindowsAzure.ApiManagement.Gateway.Security.Backend.Protocols.Tls10": "False",
+                  "Microsoft.WindowsAzure.ApiManagement.Gateway.Security.Backend.Protocols.Tls11": "False",
+                  "Microsoft.WindowsAzure.ApiManagement.Gateway.Security.Backend.Protocols.Ssl30": "False",
+                  "Microsoft.WindowsAzure.ApiManagement.Gateway.Protocols.Server.Http2": "False"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.ApiManagement/service/namedValues",
+              "apiVersion": "2023-09-01-preview",
+              "name": "[format('{0}/{1}', parameters('name'), 'aad-tenant-id')]",
+              "properties": {
+                "displayName": "aad-tenant-id",
+                "value": "[parameters('aadTenantId')]",
+                "secret": false
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ApiManagement/service', parameters('name'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.ApiManagement/service/namedValues",
+              "apiVersion": "2023-09-01-preview",
+              "name": "[format('{0}/{1}', parameters('name'), 'aad-api-audience')]",
+              "properties": {
+                "displayName": "aad-api-audience",
+                "value": "[parameters('aadApiAudience')]",
+                "secret": false
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ApiManagement/service', parameters('name'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.ApiManagement/service/namedValues",
+              "apiVersion": "2023-09-01-preview",
+              "name": "[format('{0}/{1}', parameters('name'), 'aad-api-client-id')]",
+              "properties": {
+                "displayName": "aad-api-client-id",
+                "value": "[parameters('aadApiClientId')]",
+                "secret": false
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ApiManagement/service', parameters('name'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.ApiManagement/service/backends",
+              "apiVersion": "2023-09-01-preview",
+              "name": "[format('{0}/{1}', parameters('name'), parameters('backendId'))]",
+              "properties": {
+                "description": "[format('Backend for {0} Container App', parameters('backendAppName'))]",
+                "url": "[variables('backendUrl')]",
+                "protocol": "http",
+                "tls": {
+                  "validateCertificateChain": true,
+                  "validateCertificateName": true
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ApiManagement/service', parameters('name'))]"
+              ]
+            },
+            {
+              "condition": "[and(not(empty(parameters('appInsightsId'))), not(empty(parameters('appInsightsInstrumentationKey'))))]",
+              "type": "Microsoft.ApiManagement/service/loggers",
+              "apiVersion": "2023-09-01-preview",
+              "name": "[format('{0}/{1}', parameters('name'), 'appinsights-logger')]",
+              "properties": {
+                "loggerType": "applicationInsights",
+                "description": "[format('Application Insights logger for {0}', parameters('name'))]",
+                "resourceId": "[parameters('appInsightsId')]",
+                "credentials": {
+                  "instrumentationKey": "[parameters('appInsightsInstrumentationKey')]"
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ApiManagement/service', parameters('name'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.ApiManagement/service/apis",
+              "apiVersion": "2023-09-01-preview",
+              "name": "[format('{0}/{1}', parameters('name'), parameters('apiId'))]",
+              "properties": {
+                "displayName": "[parameters('apiDisplayName')]",
+                "path": "[parameters('apiPath')]",
+                "protocols": [
+                  "https"
+                ],
+                "serviceUrl": "[variables('backendUrl')]",
+                "subscriptionRequired": true
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ApiManagement/service', parameters('name'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.ApiManagement/service/apis/operations",
+              "apiVersion": "2023-09-01-preview",
+              "name": "[format('{0}/{1}/{2}', parameters('name'), parameters('apiId'), 'health')]",
+              "properties": {
+                "displayName": "Health",
+                "method": "GET",
+                "urlTemplate": "/health",
+                "templateParameters": [],
+                "request": {
+                  "queryParameters": [],
+                  "headers": [],
+                  "representations": []
+                },
+                "responses": [
+                  {
+                    "statusCode": 200,
+                    "description": "OK"
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ApiManagement/service/apis', parameters('name'), parameters('apiId'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.ApiManagement/service/apis/operations",
+              "apiVersion": "2023-09-01-preview",
+              "name": "[format('{0}/{1}/{2}', parameters('name'), parameters('apiId'), 'detect')]",
+              "properties": {
+                "displayName": "Detect",
+                "method": "POST",
+                "urlTemplate": "/v1/detect",
+                "templateParameters": [],
+                "request": {
+                  "queryParameters": [],
+                  "headers": [],
+                  "representations": [
+                    {
+                      "contentType": "application/json"
+                    }
+                  ]
+                },
+                "responses": [
+                  {
+                    "statusCode": 200,
+                    "description": "OK"
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ApiManagement/service/apis', parameters('name'), parameters('apiId'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.ApiManagement/service/apis/policies",
+              "apiVersion": "2023-09-01-preview",
+              "name": "[format('{0}/{1}/{2}', parameters('name'), parameters('apiId'), 'policy')]",
+              "properties": {
+                "format": "rawxml",
+                "value": "[variables('apiPolicyXml')]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ApiManagement/service/apis', parameters('name'), parameters('apiId'))]",
+                "[resourceId('Microsoft.ApiManagement/service/backends', parameters('name'), parameters('backendId'))]",
+                "[resourceId('Microsoft.ApiManagement/service/namedValues', parameters('name'), 'aad-api-audience')]",
+                "[resourceId('Microsoft.ApiManagement/service/namedValues', parameters('name'), 'aad-api-client-id')]",
+                "[resourceId('Microsoft.ApiManagement/service/namedValues', parameters('name'), 'aad-tenant-id')]"
+              ]
+            },
+            {
+              "condition": "[and(not(empty(parameters('appInsightsId'))), not(empty(parameters('appInsightsInstrumentationKey'))))]",
+              "type": "Microsoft.ApiManagement/service/apis/diagnostics",
+              "apiVersion": "2023-09-01-preview",
+              "name": "[format('{0}/{1}/{2}', parameters('name'), parameters('apiId'), 'applicationinsights')]",
+              "properties": {
+                "alwaysLog": "allErrors",
+                "httpCorrelationProtocol": "W3C",
+                "verbosity": "information",
+                "logClientIp": true,
+                "loggerId": "[resourceId('Microsoft.ApiManagement/service/loggers', parameters('name'), 'appinsights-logger')]",
+                "sampling": {
+                  "samplingType": "fixed",
+                  "percentage": 100
+                },
+                "frontend": {
+                  "request": {
+                    "body": {
+                      "bytes": 0
+                    },
+                    "headers": []
+                  },
+                  "response": {
+                    "body": {
+                      "bytes": 0
+                    },
+                    "headers": []
+                  }
+                },
+                "backend": {
+                  "request": {
+                    "body": {
+                      "bytes": 0
+                    },
+                    "headers": []
+                  },
+                  "response": {
+                    "body": {
+                      "bytes": 0
+                    },
+                    "headers": []
+                  }
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ApiManagement/service/loggers', parameters('name'), 'appinsights-logger')]",
+                "[resourceId('Microsoft.ApiManagement/service/apis', parameters('name'), parameters('apiId'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "id": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.ApiManagement/service', parameters('name'))]"
+            },
+            "name": {
+              "type": "string",
+              "value": "[parameters('name')]"
+            },
+            "gatewayUrl": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ApiManagement/service', parameters('name')), '2023-09-01-preview').gatewayUrl]"
+            },
+            "principalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ApiManagement/service', parameters('name')), '2023-09-01-preview', 'full').identity.principalId]"
+            },
+            "backendId": {
+              "type": "string",
+              "value": "[parameters('backendId')]"
+            },
+            "apiPath": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ApiManagement/service/apis', parameters('name'), parameters('apiId')), '2023-09-01-preview').path]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'mod-cae')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-monitoring')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-network')]"
+      ]
+    }
+  ],
+  "outputs": {
+    "logAnalyticsId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-monitoring'), '2025-04-01').outputs.logAnalyticsId.value]"
+    },
+    "appInsightsConnectionString": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-monitoring'), '2025-04-01').outputs.appInsightsConnectionString.value]"
+    },
+    "contentSafetyEndpoint": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-contentsafety'), '2025-04-01').outputs.endpoint.value]"
+    },
+    "contentSafetyPrincipalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-contentsafety'), '2025-04-01').outputs.principalId.value]"
+    },
+    "natGatewayPublicIp": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-network'), '2025-04-01').outputs.natGatewayPublicIp.value]"
+    },
+    "vnetId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-network'), '2025-04-01').outputs.vnetId.value]"
+    },
+    "acrLoginServer": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.loginServer.value]"
+    },
+    "acrPrincipalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.principalId.value]"
+    },
+    "caeName": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-cae'), '2025-04-01').outputs.name.value]"
+    },
+    "caeDefaultDomain": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-cae'), '2025-04-01').outputs.defaultDomain.value]"
+    },
+    "appFqdn": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-apps'), '2025-04-01').outputs.appFqdn.value]"
+    },
+    "appPrincipalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-apps'), '2025-04-01').outputs.appPrincipalId.value]"
+    },
+    "stage2Fqdn": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-apps'), '2025-04-01').outputs.stage2Fqdn.value]"
+    },
+    "stage2PrincipalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-apps'), '2025-04-01').outputs.stage2PrincipalId.value]"
+    },
+    "apimGatewayUrl": {
+      "type": "string",
+      "value": "[if(parameters('deployApim'), reference(resourceId('Microsoft.Resources/deployments', 'mod-apim'), '2025-04-01').outputs.gatewayUrl.value, '')]"
+    },
+    "apimPrincipalId": {
+      "type": "string",
+      "value": "[if(parameters('deployApim'), reference(resourceId('Microsoft.Resources/deployments', 'mod-apim'), '2025-04-01').outputs.principalId.value, '')]"
+    },
+    "storageAccountName": {
+      "type": "string",
+      "value": "[if(parameters('deployStorage'), reference(resourceId('Microsoft.Resources/deployments', 'mod-storage'), '2025-04-01').outputs.name.value, '')]"
+    },
+    "storageNfsHost": {
+      "type": "string",
+      "value": "[if(parameters('deployStorage'), reference(resourceId('Microsoft.Resources/deployments', 'mod-storage'), '2025-04-01').outputs.fileEndpointHost.value, '')]"
+    },
+    "storageNfsSharePath": {
+      "type": "string",
+      "value": "[if(parameters('deployStorage'), reference(resourceId('Microsoft.Resources/deployments', 'mod-storage'), '2025-04-01').outputs.nfsSharePath.value, '')]"
+    },
+    "hfCacheMountPath": {
+      "type": "string",
+      "value": "[if(parameters('deployStorage'), format('/mount/{0}/{1}', reference(resourceId('Microsoft.Resources/deployments', 'mod-storage'), '2025-04-01').outputs.name.value, parameters('hfCacheShareName')), '')]"
+    },
+    "hfPrewarmJobName": {
+      "type": "string",
+      "value": "[if(and(and(and(parameters('deployHfPrewarmJob'), parameters('deployStorage')), parameters('deployStage2')), not(parameters('weightsInImage'))), reference(resourceId('Microsoft.Resources/deployments', 'mod-hfprewarm'), '2025-04-01').outputs.jobName.value, '')]"
+    }
+  }
+}

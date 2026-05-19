@@ -1,0 +1,23 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.cache/
+TODO.md
+
+data/
+notebooks/
+
+# Local experiments scratch — cloud MLflow is the durable record
+experiments/
+
+# Eval run artifacts (eval code is committed; only outputs are ignored)
+evals/runs/
+
+# Agent coordination (local-only)
+.agent-work/
+
+# Windows Zone Identifier files
+*:Zone.Identifier

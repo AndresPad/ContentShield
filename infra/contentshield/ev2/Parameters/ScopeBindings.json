@@ -1,0 +1,28 @@
+{
+  "$schema": "https://ev2schema.azure.net/schemas/2020-01-01/ScopeBindings.json",
+  "ContentVersion": "1.0.0.0",
+  "ScopeBindings": [
+    {
+      "Name": "ContentShield.Prod.WestUS3",
+      "Bindings": [
+        { "Find": "$config(environment)",         "ReplaceWith": "Prod" },
+        { "Find": "$config(serviceIdentifier)",   "ReplaceWith": "00000000-0000-0000-0000-000000000000" },
+        { "Find": "$config(subscriptionId)",      "ReplaceWith": "REPLACE-WITH-CUSTOMER-SUBSCRIPTION-ID" },
+        { "Find": "$config(resourceGroup)",       "ReplaceWith": "rg-contentshield" },
+        { "Find": "$config(location)",            "ReplaceWith": "westus3" },
+        { "Find": "$config(nameSuffix)",          "ReplaceWith": "" },
+        { "Find": "$config(apimPublisherEmail)",  "ReplaceWith": "contentshield-ops@microsoft.com" },
+        { "Find": "$config(notificationEmail)",   "ReplaceWith": "contentshield-ops@microsoft.com" },
+        { "Find": "$config(vendorAcrFqdn)",       "ReplaceWith": "contentshieldacr.azurecr.io" },
+        { "Find": "$config(imageTag)",            "ReplaceWith": "1.4.0" },
+        { "Find": "$config(useAad)",              "ReplaceWith": "true" },
+        { "Find": "$config(skipApim)",            "ReplaceWith": "false" },
+        { "Find": "$config(skipStage2)",          "ReplaceWith": "false" },
+        { "Find": "$config(waitForPrewarm)",      "ReplaceWith": "false" },
+        { "Find": "$config(smokeTimeoutSeconds)", "ReplaceWith": "600" },
+        { "Find": "$config(deploymentIdentity)",  "ReplaceWith": "/subscriptions/REPLACE/resourceGroups/REPLACE/providers/Microsoft.ManagedIdentity/userAssignedIdentities/contentshield-ev2-mi" },
+        { "Find": "$config(hfTokenSecretId)",     "ReplaceWith": "https://REPLACE-kv.vault.azure.net/secrets/hf-token" }
+      ]
+    }
+  ]
+}

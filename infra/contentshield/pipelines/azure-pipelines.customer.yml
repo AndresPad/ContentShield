@@ -1,0 +1,227 @@
+# ContentShield — Customer Release Pipeline (TEMPLATE)
+#
+# Copy this file into the customer's ADO repo as azure-pipelines.yml (or
+# similar) and fill in the variable group + service connection.
+#
+# Two stages:
+#   1. AcquireImages  — pull v$(imageTag) from the vendor ACR into the
+#                       customer ACR using either:
+#                         * AAD       (internal Microsoft customers, same tenant)
+#                         * a scoped token (external customers)
+#                       Artifact Streaming is auto-enabled inside the sync script.
+#   2. DeployInfra    — run deploy.ps1, which pins the container apps to
+#                       the just-imported tag and rolls a new revision.
+#
+# Pipeline variables to set (recommend a variable group):
+#   serviceConnection      ADO service connection name (Azure RM)
+#   subscriptionId         Customer Azure subscription id
+#   resourceGroup          Existing RG that ContentShield is deployed into
+#   apimPublisherEmail     Required by APIM
+#   suffix                 Suffix used in your customer ACR name
+#                          (e.g. contentshieldacr<suffix>)
+#   vendorAcrFqdn          contentshieldacr.azurecr.io (or your vendor ACR FQDN)
+#   imageTag               Semver to deploy, e.g. 1.4.0 — set per release
+#   useAad                 true | false
+#                            true  -> internal MS, same-tenant AAD auth
+#                            false -> external, requires the two token vars below
+#   vendorAcrTokenName     Required when useAad=false
+#   vendorAcrTokenPassword Required when useAad=false  (KEEP IN AZURE KEY VAULT)
+#
+# Recommended: store vendorAcrTokenPassword in Azure Key Vault and surface
+# it via a Key Vault-linked variable group so it never appears in logs.
+
+trigger: none           # release pipeline — invoke manually or from a webhook
+pr: none
+
+parameters:
+  - name: imageTag
+    displayName: 'Image tag to deploy (semver, e.g. 1.4.0)'
+    type: string
+    default: '1.4.0'
+  - name: skipApim
+    displayName: 'Skip APIM deployment (fast iteration)'
+    type: boolean
+    default: false
+  - name: skipStage2
+    displayName: 'Skip stage-2 GPU app (no GPU quota)'
+    type: boolean
+    default: false
+  - name: syncWeights
+    displayName: 'Sync model weights ORAS artifact from vendor ACR'
+    type: boolean
+    default: false
+  - name: weightsTag
+    displayName: 'Weights artifact tag (defaults to imageTag if empty)'
+    type: string
+    default: ''
+
+variables:
+  - group: contentshield-release        # variable group described above
+  - name: imageTag
+    value: ${{ parameters.imageTag }}
+
+stages:
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1: Acquire images from the vendor ACR
+# ─────────────────────────────────────────────────────────────────────────────
+- stage: AcquireImages
+  displayName: 'Acquire ContentShield images'
+  jobs:
+    - job: Import
+      displayName: 'Import & enable artifact streaming'
+      pool:
+        vmImage: 'ubuntu-latest'
+      steps:
+
+        - checkout: self
+
+        - task: AzureCLI@2
+          displayName: 'Sync images from vendor ACR (AAD)'
+          condition: eq(variables['useAad'], 'true')
+          inputs:
+            azureSubscription: $(serviceConnection)
+            scriptType: pscore
+            scriptLocation: scriptPath
+            scriptPath: infra/contentshield/scripts/sync-images-from-vendor.ps1
+            arguments: >-
+              -TargetAcrName "contentshieldacr$(suffix)"
+              -VendorAcrFqdn  "$(vendorAcrFqdn)"
+              -Tag            "$(imageTag)"
+              -UseAad
+              -Force
+
+        - task: AzureCLI@2
+          displayName: 'Sync images from vendor ACR (scoped token)'
+          condition: ne(variables['useAad'], 'true')
+          inputs:
+            azureSubscription: $(serviceConnection)
+            scriptType: pscore
+            scriptLocation: scriptPath
+            scriptPath: infra/contentshield/scripts/sync-images-from-vendor.ps1
+            arguments: >-
+              -TargetAcrName          "contentshieldacr$(suffix)"
+              -VendorAcrFqdn          "$(vendorAcrFqdn)"
+              -VendorAcrTokenName     "$(vendorAcrTokenName)"
+              -VendorAcrTokenPassword "$(vendorAcrTokenPassword)"
+              -Tag                    "$(imageTag)"
+              -Force
+
+        # ---------------------------------------------------------------------
+        # Optional: copy the model-weights OCI artifact from the vendor ACR
+        # into the customer ACR using ORAS. Skipped unless -syncWeights=true.
+        # Required only when the hfPrewarmJob is configured with
+        # modelSource=acr-oras (Bicep param). Customers still on the HF Hub
+        # path leave this off.
+        # ---------------------------------------------------------------------
+        - task: Bash@3
+          displayName: 'Install oras CLI (for weights sync)'
+          condition: and(succeeded(), eq('${{ parameters.syncWeights }}', 'true'))
+          inputs:
+            targetType: inline
+            script: |
+              set -euo pipefail
+              ORAS_VERSION=1.2.3
+              cd "$(Agent.TempDirectory)"
+              curl -fsSL -o oras.tar.gz \
+                "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+              tar -xzf oras.tar.gz oras
+              chmod +x oras
+              echo "##vso[task.prependpath]$(Agent.TempDirectory)"
+              ./oras version
+
+        - task: AzureCLI@2
+          displayName: 'Sync weights artifact (AAD)'
+          condition: and(succeeded(), eq('${{ parameters.syncWeights }}', 'true'), eq(variables['useAad'], 'true'))
+          inputs:
+            azureSubscription: $(serviceConnection)
+            scriptType: pscore
+            scriptLocation: scriptPath
+            scriptPath: infra/contentshield/scripts/sync-weights-from-vendor.ps1
+            arguments: >-
+              -TargetAcrName "contentshieldacr$(suffix)"
+              -VendorAcrFqdn "$(vendorAcrFqdn)"
+              -Tag           "${{ coalesce(parameters.weightsTag, parameters.imageTag) }}"
+              -UseAad
+
+        - task: AzureCLI@2
+          displayName: 'Sync weights artifact (scoped token)'
+          condition: and(succeeded(), eq('${{ parameters.syncWeights }}', 'true'), ne(variables['useAad'], 'true'))
+          inputs:
+            azureSubscription: $(serviceConnection)
+            scriptType: pscore
+            scriptLocation: scriptPath
+            scriptPath: infra/contentshield/scripts/sync-weights-from-vendor.ps1
+            arguments: >-
+              -TargetAcrName          "contentshieldacr$(suffix)"
+              -VendorAcrFqdn          "$(vendorAcrFqdn)"
+              -VendorAcrTokenName     "$(vendorAcrTokenName)"
+              -VendorAcrTokenPassword "$(vendorAcrTokenPassword)"
+              -Tag                    "${{ coalesce(parameters.weightsTag, parameters.imageTag) }}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2: Deploy / roll the container apps to the new tag
+# ─────────────────────────────────────────────────────────────────────────────
+- stage: DeployInfra
+  displayName: 'Deploy ContentShield infrastructure'
+  dependsOn: AcquireImages
+  condition: succeeded()
+  jobs:
+    - deployment: Deploy
+      displayName: 'Roll container apps to new image tag'
+      environment: 'contentshield-prod'       # change per env (dev/stage/prod)
+      pool:
+        vmImage: 'ubuntu-latest'
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+
+              - checkout: self
+
+              - task: AzureCLI@2
+                displayName: 'deploy.ps1 — pin tag $(imageTag), roll revision'
+                inputs:
+                  azureSubscription: $(serviceConnection)
+                  scriptType: pscore
+                  scriptLocation: scriptPath
+                  scriptPath: infra/contentshield/deploy.ps1
+                  arguments: >-
+                    -SubscriptionId      "$(subscriptionId)"
+                    -ResourceGroup       "$(resourceGroup)"
+                    -ApimPublisherEmail  "$(apimPublisherEmail)"
+                    -ImageTag            "$(imageTag)"
+                    -SkipImageImport
+                    ${{ if eq(parameters.skipApim, true) }}:
+                      -SkipApim
+                    ${{ if eq(parameters.skipStage2, true) }}:
+                      -SkipStage2
+
+              - task: AzureCLI@2
+                displayName: 'Smoke test — /health on main app'
+                inputs:
+                  azureSubscription: $(serviceConnection)
+                  scriptType: pscore
+                  scriptLocation: inlineScript
+                  inlineScript: |
+                    $rg = "$(resourceGroup)"
+                    $fqdn = az containerapp show `
+                      -n ca-ratio-contentshield -g $rg `
+                      --query properties.configuration.ingress.fqdn -o tsv
+                    if (-not $fqdn) { throw "Main app FQDN not found." }
+                    Write-Host "Probing https://$fqdn/health ..."
+                    $attempts = 0
+                    do {
+                      try {
+                        $resp = Invoke-WebRequest -Uri "https://$fqdn/health" `
+                                  -UseBasicParsing -TimeoutSec 10
+                        if ($resp.StatusCode -eq 200) {
+                          Write-Host "Healthy."; exit 0
+                        }
+                      } catch {
+                        Write-Host "  not ready yet ($($_.Exception.Message))"
+                      }
+                      Start-Sleep -Seconds 10
+                      $attempts++
+                    } while ($attempts -lt 30)
+                    throw "Health check failed after 5 minutes."

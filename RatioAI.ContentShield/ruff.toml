@@ -1,0 +1,39 @@
+# Ruff configuration — Google Python Style Guide
+# https://google.github.io/styleguide/pyguide.html
+
+line-length = 100
+target-version = "py311"
+
+# Eval scripts are research code with their own lifecycle; exclude from the
+# product lint contract. The app and tests stay strict.
+extend-exclude = ["evals"]
+
+[lint]
+select = [
+  "E",    # pycodestyle errors
+  "F",    # pyflakes
+  "W",    # pycodestyle warnings
+  "I",    # isort
+  "N",    # pep8-naming
+  "D",    # pydocstyle (Google convention)
+  "UP",   # pyupgrade
+  "B",    # flake8-bugbear
+  "SIM",  # flake8-simplify
+  "TCH",  # flake8-type-checking
+  "RUF",  # Ruff-specific rules
+]
+ignore = [
+  "D100",  # missing docstring in public module
+  "D104",  # missing docstring in public package
+  "D105",  # missing docstring in magic method
+  "D107",  # missing docstring in __init__
+]
+
+[lint.pydocstyle]
+convention = "google"
+
+[lint.isort]
+known-first-party = ["contentshield"]
+
+[lint.per-file-ignores]
+"tests/*" = ["D"]  # Test methods don't need docstrings

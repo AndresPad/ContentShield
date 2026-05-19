@@ -1,0 +1,71 @@
+{
+  "$schema": "https://ev2schema.azure.net/schemas/2020-01-01/serviceModel.json",
+  "contentVersion": "1.0.0.0",
+  "ServiceMetadata": {
+    "ServiceGroup": "ContentShield",
+    "ServiceIdentifier": "$config(serviceIdentifier)",
+    "Environment": "$config(environment)"
+  },
+  "ServiceResourceGroupDefinitions": [
+    {
+      "Name": "ContentShield.SRG.Definition",
+      "ServiceResourceDefinitions": [
+        {
+          "Name": "ContentShield.Shell.SRDef",
+          "ComposedOf": {
+            "Extension": {
+              "RolloutParametersPath": "Parameters\\Shell.RolloutParameters.json",
+              "Shell": [
+                {
+                  "Name": "preflight",
+                  "Type": "ShellExtensionType",
+                  "Properties": {
+                    "MaxExecutionTime": "PT15M",
+                    "ImageName": "adm-mariner-20-l",
+                    "ImageVersion": "v9",
+                    "Command": "Bin/preflight.sh"
+                  }
+                },
+                {
+                  "Name": "deploy",
+                  "Type": "ShellExtensionType",
+                  "Properties": {
+                    "MaxExecutionTime": "PT90M",
+                    "ImageName": "adm-mariner-20-l",
+                    "ImageVersion": "v9",
+                    "Command": "Bin/deploy.sh"
+                  }
+                },
+                {
+                  "Name": "smoke",
+                  "Type": "ShellExtensionType",
+                  "Properties": {
+                    "MaxExecutionTime": "PT15M",
+                    "ImageName": "adm-mariner-20-l",
+                    "ImageVersion": "v9",
+                    "Command": "Bin/smoke.sh"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "ServiceResourceGroups": [
+    {
+      "AzureResourceGroupName": "$config(resourceGroup)",
+      "Location": "$config(location)",
+      "InstanceOf": "ContentShield.SRG.Definition",
+      "AzureSubscriptionId": "$config(subscriptionId)",
+      "ServiceResources": [
+        {
+          "Name": "ContentShield.Shell",
+          "InstanceOf": "ContentShield.Shell.SRDef",
+          "RolloutParametersPath": "Parameters\\Shell.RolloutParameters.json"
+        }
+      ]
+    }
+  ]
+}

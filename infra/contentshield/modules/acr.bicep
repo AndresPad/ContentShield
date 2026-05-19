@@ -26,7 +26,7 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' = {
     policies: {
       retentionPolicy: {
         days: 7
-        status: 'disabled'
+        status: 'enabled'
       }
       trustPolicy: {
         type: 'Notary'

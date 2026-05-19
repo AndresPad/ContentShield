@@ -1,0 +1,35 @@
+# ContentShield Stage-2 — weights-baked variant.
+#
+# Produces:   <acr>/contentshield-stage2-baked:<ver>
+# On top of:  <acr>/contentshield-stage2:<ver>          (the regular app image)
+#
+# Why this exists:
+#   The regular stage-2 image is a thin overlay on top of a CUDA+vLLM base
+#   image. Weights are populated at runtime via NFS + the HF cache pre-warm
+#   job. That's the recommended path for most customers.
+#
+#   This baked variant adds the weights as a single OCI layer so a customer
+#   can run with:
+#     * no NFS share (storage module disabled)
+#     * no pre-warm job (job disabled)
+#     * sub-60s cold start via ACR artifact streaming
+#   The trade-off is a 10-30 GB image and per-node disk cost on every GPU
+#   replica.
+#
+# Build context expectations:
+#   - APP_IMAGE  must be the fully-qualified ref of the matching regular
+#                stage-2 tag, e.g.
+#                   contentshieldacr.azurecr.io/contentshield-stage2:1.4.0
+#   - ./_weights/  must contain the untarred HF cache tree (models--<org>--<name>/...)
+#     ready to land at /mnt/hfcache. The caller (publish-image.ps1 -WithWeights)
+#     prepares it via `oras pull` + tar extraction.
+ARG APP_IMAGE
+FROM ${APP_IMAGE}
+
+# One COPY -> one OCI layer. Code-only patches in the app image do not bust
+# this layer; only a model bump rebuilds it.
+COPY _weights/ /mnt/hfcache/
+
+# vLLM reads HF_HOME; baking it here means the runtime needs no env override
+# and no NFS mount.
+ENV HF_HOME=/mnt/hfcache

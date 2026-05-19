@@ -8,7 +8,7 @@ param location = 'westus3'
 // nameSuffix: leave commented to auto-derive a unique suffix from your subscription id
 // (default: take(uniqueString(subscription().id), 6) — guarantees globally-unique names).
 // Override only if you want a memorable token (3-8 lowercase alphanumeric).
-// param nameSuffix = 'mycs01'
+param nameSuffix = 'axa'
 
 param tags = {
   workload: 'contentshield'

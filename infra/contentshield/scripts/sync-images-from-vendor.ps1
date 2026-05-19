@@ -31,39 +31,73 @@
 
 .PARAMETER Force
   Pass --force to overwrite existing target tags.
+
+.PARAMETER EnableArtifactStreaming
+  After import, enable ACR Artifact Streaming on each target repo (auto-on)
+  AND force-create a streaming manifest for each freshly imported tag.
+  Drops stage-2 cold-start from minutes to seconds. Requires Premium ACR.
+  On by default; pass -EnableArtifactStreaming:$false to skip.
+
+.PARAMETER UseAad
+  Use AAD/MI auth for the vendor ACR pull (no token name/password needed).
+  Requires the *current* az login identity to have AcrPull on the vendor ACR.
+  Intended for internal-Microsoft customers where vendor + customer are in
+  the same tenant. When -UseAad is set, -VendorAcrTokenName/-VendorAcrTokenPassword
+  may be omitted; if supplied they are ignored.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$TargetAcrName,
     [Parameter(Mandatory)][string]$VendorAcrFqdn,
-    [Parameter(Mandatory)][string]$VendorAcrTokenName,
-    [Parameter(Mandatory)][string]$VendorAcrTokenPassword,
+    [string]$VendorAcrTokenName,
+    [string]$VendorAcrTokenPassword,
     [string[]]$Repositories = @('contentshield','contentshield-stage2'),
     [string]$Tag = 'latest',
     [switch]$AllTags,
-    [switch]$Force
+    [switch]$Force,
+    [bool]$EnableArtifactStreaming = $true,
+    [switch]$UseAad
 )
 
 $ErrorActionPreference = 'Stop'
+
+if (-not $UseAad) {
+    if (-not $VendorAcrTokenName -or -not $VendorAcrTokenPassword) {
+        throw "Either pass -UseAad (AAD auth) OR both -VendorAcrTokenName and -VendorAcrTokenPassword (scoped-token auth)."
+    }
+}
 
 # Helper: list tags in a remote ACR repo via the Docker Registry v2 API using
 # the scoped token. ACR's data-plane requires a two-step Basic -> Bearer token
 # exchange before /v2/<repo>/tags/list works.
 function Get-RemoteTags {
-    param([string]$Fqdn, [string]$Repo, [string]$Username, [string]$Password)
-    $basic = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${Username}:${Password}"))
+    param([string]$Fqdn, [string]$Repo, [string]$Username, [string]$Password, [switch]$UseAad)
     try {
-        # Step 1: exchange Basic creds for a short-lived Bearer access token scoped to metadata_read
-        $tokenResp = Invoke-RestMethod -Method GET `
-            -Uri "https://$Fqdn/oauth2/token?service=$Fqdn&scope=repository:${Repo}:metadata_read" `
-            -Headers @{ Authorization = "Basic $basic" } -ErrorAction Stop
-        if (-not $tokenResp.access_token) { throw "Token exchange returned no access_token." }
-        # Step 2: list tags using the Bearer access token
+        if ($UseAad) {
+            # AAD path: exchange an AAD access token for an ACR refresh+access token.
+            $aadToken = az account get-access-token --resource "https://$Fqdn" --query accessToken -o tsv 2>$null
+            if (-not $aadToken) {
+                # Fallback to ARM resource if data-plane resource isn't accepted in the cloud.
+                $aadToken = az account get-access-token --resource 'https://management.azure.com/' --query accessToken -o tsv
+            }
+            $refresh = Invoke-RestMethod -Method POST -Uri "https://$Fqdn/oauth2/exchange" `
+                -Body @{ grant_type='access_token'; service=$Fqdn; access_token=$aadToken } -ErrorAction Stop
+            $accessResp = Invoke-RestMethod -Method POST -Uri "https://$Fqdn/oauth2/token" `
+                -Body @{ grant_type='refresh_token'; service=$Fqdn; scope="repository:${Repo}:metadata_read"; refresh_token=$refresh.refresh_token } -ErrorAction Stop
+            $bearer = $accessResp.access_token
+        } else {
+            $basic = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${Username}:${Password}"))
+            $tokenResp = Invoke-RestMethod -Method GET `
+                -Uri "https://$Fqdn/oauth2/token?service=$Fqdn&scope=repository:${Repo}:metadata_read" `
+                -Headers @{ Authorization = "Basic $basic" } -ErrorAction Stop
+            if (-not $tokenResp.access_token) { throw "Token exchange returned no access_token." }
+            $bearer = $tokenResp.access_token
+        }
         $resp = Invoke-RestMethod -Method GET `
             -Uri "https://$Fqdn/v2/$Repo/tags/list" `
-            -Headers @{ Authorization = "Bearer $($tokenResp.access_token)" } -ErrorAction Stop
+            -Headers @{ Authorization = "Bearer $bearer" } -ErrorAction Stop
     } catch {
-        throw "Could not list tags for $Fqdn/$Repo. The scoped token must have 'metadata/read' on the repo. ($_)"
+        throw "Could not list tags for $Fqdn/$Repo. ($_)"
     }
     if (-not $resp.tags) { return @() }
     return @($resp.tags)
@@ -74,16 +108,28 @@ Write-Host "`nImporting images from $VendorAcrFqdn -> $TargetAcrName.azurecr.io"
 # Helper: get the newest tag in a remote ACR repo (by lastUpdateTime) using the
 # ACR-specific /acr/v1 catalog endpoint.
 function Get-NewestTag {
-    param([string]$Fqdn, [string]$Repo, [string]$Username, [string]$Password)
-    $basic = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${Username}:${Password}"))
+    param([string]$Fqdn, [string]$Repo, [string]$Username, [string]$Password, [switch]$UseAad)
     try {
-        # Same Basic -> Bearer exchange, then use the ACR-specific time-ordered tags endpoint
-        $tokenResp = Invoke-RestMethod -Method GET `
-            -Uri "https://$Fqdn/oauth2/token?service=$Fqdn&scope=repository:${Repo}:metadata_read" `
-            -Headers @{ Authorization = "Basic $basic" } -ErrorAction Stop
+        if ($UseAad) {
+            $aadToken = az account get-access-token --resource "https://$Fqdn" --query accessToken -o tsv 2>$null
+            if (-not $aadToken) {
+                $aadToken = az account get-access-token --resource 'https://management.azure.com/' --query accessToken -o tsv
+            }
+            $refresh = Invoke-RestMethod -Method POST -Uri "https://$Fqdn/oauth2/exchange" `
+                -Body @{ grant_type='access_token'; service=$Fqdn; access_token=$aadToken } -ErrorAction Stop
+            $accessResp = Invoke-RestMethod -Method POST -Uri "https://$Fqdn/oauth2/token" `
+                -Body @{ grant_type='refresh_token'; service=$Fqdn; scope="repository:${Repo}:metadata_read"; refresh_token=$refresh.refresh_token } -ErrorAction Stop
+            $bearer = $accessResp.access_token
+        } else {
+            $basic = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${Username}:${Password}"))
+            $tokenResp = Invoke-RestMethod -Method GET `
+                -Uri "https://$Fqdn/oauth2/token?service=$Fqdn&scope=repository:${Repo}:metadata_read" `
+                -Headers @{ Authorization = "Basic $basic" } -ErrorAction Stop
+            $bearer = $tokenResp.access_token
+        }
         $resp = Invoke-RestMethod -Method GET `
             -Uri "https://$Fqdn/acr/v1/$Repo/_tags?orderby=timedesc&n=1" `
-            -Headers @{ Authorization = "Bearer $($tokenResp.access_token)" } -ErrorAction Stop
+            -Headers @{ Authorization = "Bearer $bearer" } -ErrorAction Stop
         if ($resp.tags -and $resp.tags.Count -gt 0) { return $resp.tags[0].name }
     } catch {
         Write-Host "  (Could not fetch newest tag for $Repo : $($_.Exception.Message))" -ForegroundColor DarkYellow
@@ -97,7 +143,7 @@ foreach ($repo in $Repositories) {
     if ($AllTags) {
         Write-Host "  Listing tags for $repo via Registry v2 API..." -ForegroundColor Gray
         $tagsToImport = Get-RemoteTags -Fqdn $VendorAcrFqdn -Repo $repo `
-            -Username $VendorAcrTokenName -Password $VendorAcrTokenPassword
+            -Username $VendorAcrTokenName -Password $VendorAcrTokenPassword -UseAad:$UseAad
         if (-not $tagsToImport) {
             Write-Host "  [skip] No tags found in $repo on source." -ForegroundColor Yellow
             continue
@@ -114,7 +160,7 @@ foreach ($repo in $Repositories) {
         $aliasLatestFromTag = $Tag
     } elseif ($AllTags) {
         $aliasLatestFromTag = Get-NewestTag -Fqdn $VendorAcrFqdn -Repo $repo `
-            -Username $VendorAcrTokenName -Password $VendorAcrTokenPassword
+            -Username $VendorAcrTokenName -Password $VendorAcrTokenPassword -UseAad:$UseAad
         if (-not $aliasLatestFromTag) { $aliasLatestFromTag = $tagsToImport[0] }  # fallback
     } else {
         $aliasLatestFromTag = $Tag
@@ -131,11 +177,12 @@ foreach ($repo in $Repositories) {
             'acr','import',
             '-n', $TargetAcrName,
             '--source', $source,
-            '--username', $VendorAcrTokenName,
-            '--password', $VendorAcrTokenPassword,
             '--image', "${repo}:${t}",
             '--only-show-errors'
         )
+        if (-not $UseAad) {
+            $argsList += @('--username', $VendorAcrTokenName, '--password', $VendorAcrTokenPassword)
+        }
         if ($t -eq $aliasLatestFromTag) {
             $argsList += @('--image', "${repo}:latest")
         }
@@ -153,6 +200,39 @@ foreach ($repo in $Repositories) {
         }
         $extra = if ($t -eq $aliasLatestFromTag) { ' and :latest' } else { '' }
         Write-Host "  [OK] imported ${repo}:${t}$extra" -ForegroundColor Green
+
+        # ── Artifact Streaming: force-create a streaming manifest for this
+        #    just-imported tag so the first pull on a fresh node is streamed.
+        if ($EnableArtifactStreaming) {
+            $tagsToStream = @($t)
+            if ($t -eq $aliasLatestFromTag -and $t -ne 'latest') { $tagsToStream += 'latest' }
+            foreach ($st in $tagsToStream) {
+                Write-Host "  Creating artifact-streaming manifest for ${repo}:${st} ..." -ForegroundColor DarkGray
+                az acr artifact-streaming create `
+                    --name $TargetAcrName `
+                    --image "${repo}:${st}" `
+                    --only-show-errors 2>&1 | Out-Host
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "    [warn] artifact-streaming create failed for ${repo}:${st}. Continuing (ACR Premium required; preview feature in some regions)." -ForegroundColor Yellow
+                    $LASTEXITCODE = 0
+                }
+            }
+        }
+    }
+
+    # ── Artifact Streaming: turn ON auto-conversion for the whole repo, so
+    #    every future push/import is converted without any extra step.
+    if ($EnableArtifactStreaming) {
+        Write-Host "  Enabling auto artifact-streaming on repo '$repo' ..." -ForegroundColor DarkGray
+        az acr artifact-streaming update `
+            --name $TargetAcrName `
+            --repository $repo `
+            --enable-auto-streaming True `
+            --only-show-errors 2>&1 | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "    [warn] artifact-streaming update failed for repo '$repo'. Continuing." -ForegroundColor Yellow
+            $LASTEXITCODE = 0
+        }
     }
 }
 Write-Host "Image sync complete." -ForegroundColor Green

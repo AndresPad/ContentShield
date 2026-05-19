@@ -1,0 +1,54 @@
+[project]
+name = "contentshield"
+version = "0.1.0"
+description = "Prompt injection detection service for enterprise AI systems"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.32.0",
+  "httpx>=0.27.0",
+  "pydantic>=2.0.0",
+  "sqlparse>=0.4.4",
+  "azure-identity>=1.17.0",
+  # aiohttp is required by azure.identity.aio for the async transport pipeline.
+  "aiohttp>=3.9.0",
+  "python-dotenv>=1.0.0",
+  "joblib>=1.4.0",
+  "numpy>=1.26.0",
+  # Pinned to <1.8 because the Stage-1 logreg joblib was trained on sklearn
+  # 1.7.x; sklearn 1.8 drops compat for older estimator pickles. Lift this
+  # cap only when the model is retrained and re-pickled on the new version.
+  "scikit-learn>=1.7.2,<1.8",
+]
+
+[dependency-groups]
+eval = [
+  "mlflow>=2.15.0",
+  "scikit-learn>=1.5.0",
+  "pandas>=2.2.0",
+  "numpy>=1.26.0",
+  "openpyxl>=3.1.0",
+  "tyro>=0.9.0",
+  "matplotlib>=3.9.0",
+]
+dev = [
+  "ruff>=0.11.0",
+  "pytest>=8.0.0",
+  "pytest-asyncio>=0.24.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/contentshield"]
+
+[tool.pytest.ini_options]
+markers = [
+  "integration: marks tests as requiring live external services (deselect with '-m \"not integration\"')",
+  "e2e: marks tests as requiring local cloud config and Azure login",
+  "legacy_pipeline: stage1/query_detect tests; excluded from default V1 run (deselect with '-m \"not legacy_pipeline\"')",
+]
+addopts = "-m \"not e2e and not legacy_pipeline\""
