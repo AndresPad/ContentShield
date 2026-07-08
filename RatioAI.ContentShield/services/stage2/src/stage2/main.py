@@ -17,7 +17,8 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-VLLM_URL = os.environ.get("VLLM_URL", "http://localhost:8000")
+VLLM_URL = os.environ.get("VLLM_URL", "http://localhost:8000").rstrip("/")
+VLLM_HEALTH_URL = os.environ.get("VLLM_HEALTH_URL", f"{VLLM_URL}/health").rstrip("/")
 PROMPT_PATH = os.environ.get(
     "PROMPT_PATH", "/workspace/prompts/pi-classifier-v6.txt"
 )
@@ -134,7 +135,7 @@ async def health() -> dict[str, str]:
     """200 only when both wrapper is up and vLLM is reachable."""
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
-            r = await client.get(f"{VLLM_URL}/health")
+            r = await client.get(VLLM_HEALTH_URL)
         if r.status_code != 200:
             raise HTTPException(503, detail="vllm_unhealthy")
     except httpx.RequestError as exc:

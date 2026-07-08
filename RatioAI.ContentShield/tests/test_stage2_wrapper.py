@@ -23,7 +23,12 @@ def _load_stage2_main(monkeypatch: pytest.MonkeyPatch, **env: str):
     fake_openai.AsyncOpenAI = object
     monkeypatch.setitem(sys.modules, "openai", fake_openai)
 
-    for name in ("ENABLE_STAGE2_REASON", "MAX_REASON_TOKENS"):
+    for name in (
+        "ENABLE_STAGE2_REASON",
+        "MAX_REASON_TOKENS",
+        "VLLM_URL",
+        "VLLM_HEALTH_URL",
+    ):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, value)
@@ -48,6 +53,31 @@ def test_invalid_max_reason_tokens_is_ignored_when_reason_disabled(
 
     assert module.ENABLE_STAGE2_REASON is False
     assert module.MAX_REASON_TOKENS == 64
+
+
+def test_vllm_health_url_defaults_to_vllm_url_health(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module = _load_stage2_main(
+        monkeypatch,
+        VLLM_URL="http://127.0.0.1:8000/",
+    )
+
+    assert module.VLLM_URL == "http://127.0.0.1:8000"
+    assert module.VLLM_HEALTH_URL == "http://127.0.0.1:8000/health"
+
+
+def test_vllm_health_url_can_be_configured_separately(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module = _load_stage2_main(
+        monkeypatch,
+        VLLM_URL="http://127.0.0.1:8000",
+        VLLM_HEALTH_URL="http://127.0.0.1:9000/health/",
+    )
+
+    assert module.VLLM_URL == "http://127.0.0.1:8000"
+    assert module.VLLM_HEALTH_URL == "http://127.0.0.1:9000/health"
 
 
 def test_invalid_max_reason_tokens_fails_when_reason_enabled(

@@ -68,16 +68,6 @@ param(
     # become optional.
     [switch]$UseAad,
 
-    # ── Weights (OCI artifact) sync ──────────────────────────────────────────
-    # When -VendorAcrFqdn is set, also copy contentshield-stage2-weights:<Tag>
-    # from the vendor ACR into the customer ACR via `oras copy` (AAD or token).
-    # Phase-2 then wires the prewarm job with modelSource=acr-oras so it
-    # hydrates the customer NFS share from the customer ACR — NOT HuggingFace.
-    [bool]$SyncWeights = $true,
-    [string]$WeightsRepository = 'contentshield-stage2-weights',
-    # Falls back to $ImageTag when empty.
-    [string]$WeightsTag = '',
-
     [switch]$Reset,
     [switch]$SkipApim,
     [switch]$SkipStage2,
@@ -155,9 +145,7 @@ function Invoke-BicepDeployment {
     param(
         [Parameter(Mandatory)][string]$Label,
         [string]$AppImageTagOverride,
-        [string]$Stage2ImageTagOverride,
-        [string]$ModelSourceOverride,
-        [string]$WeightsTagOverride
+        [string]$Stage2ImageTagOverride
     )
     $deploymentName = "contentshield-$Label-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
     $cmd = @(
@@ -176,11 +164,6 @@ function Invoke-BicepDeployment {
     if ($HfToken)                { $cmd += @('--parameters', "hfToken=$HfToken") }
     if ($AppImageTagOverride)    { $cmd += @('--parameters', "appImageTag=$AppImageTagOverride") }
     if ($Stage2ImageTagOverride) { $cmd += @('--parameters', "stage2ImageTag=$Stage2ImageTagOverride") }
-    if ($ModelSourceOverride)    { $cmd += @('--parameters', "modelSource=$ModelSourceOverride") }
-    if ($WeightsTagOverride)     {
-        $cmd += @('--parameters', "weightsRepository=$WeightsRepository")
-        $cmd += @('--parameters', "weightsTag=$WeightsTagOverride")
-    }
 
     if ($WhatIf) {
         Write-Host "Running what-if for phase '$Label'..." -ForegroundColor Yellow
@@ -224,39 +207,9 @@ if ($useVendorImport) {
     # Phase 2: roll container apps to the freshly imported images by tag.
     # The bicep template builds the full image reference using the customer ACR
     # login server, so we only need to pass the tag.
-
-    # ── Optionally also sync the weights OCI artifact (AAD or token). ────────
-    $effectiveWeightsTag = if ($WeightsTag) { $WeightsTag } else { $ImageTag }
-    $weightsSynced = $false
-    if ($SyncWeights) {
-        Write-Host "`nSyncing weights artifact ($WeightsRepository`:$effectiveWeightsTag) from vendor ACR -> $targetAcr ..." -ForegroundColor Cyan
-        & (Join-Path $infraDir 'scripts\sync-weights-from-vendor.ps1') `
-            -TargetAcrName $targetAcr `
-            -VendorAcrFqdn $VendorAcrFqdn `
-            -VendorAcrTokenName $VendorAcrTokenName `
-            -VendorAcrTokenPassword $VendorAcrTokenPassword `
-            -WeightsRepository $WeightsRepository `
-            -Tag $effectiveWeightsTag `
-            -UseAad:$UseAad `
-            -InstallOrasIfMissing
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "  [warn] weights sync failed. Phase 2 will fall back to modelSource=hf-hub (HuggingFace) for the prewarm job." -ForegroundColor Yellow
-            $LASTEXITCODE = 0
-        } else {
-            $weightsSynced = $true
-        }
-    }
-
-    $phase2Args = @{
-        Label = 'phase2-images'
-        AppImageTagOverride = $ImageTag
-        Stage2ImageTagOverride = $ImageTag
-    }
-    if ($weightsSynced) {
-        $phase2Args['ModelSourceOverride'] = 'acr-oras'
-        $phase2Args['WeightsTagOverride'] = $effectiveWeightsTag
-    }
-    $result = Invoke-BicepDeployment @phase2Args
+    $result = Invoke-BicepDeployment -Label 'phase2-images' `
+        -AppImageTagOverride $ImageTag `
+        -Stage2ImageTagOverride $ImageTag
     $out = $result.properties.outputs
 }
 
@@ -271,7 +224,7 @@ if ($EnableArtifactStreaming -and -not $WhatIf) {
         az acr artifact-streaming update `
             --name $targetAcr `
             --repository $repo `
-            --enable-auto-streaming True `
+            --enable-streaming True `
             --only-show-errors 2>&1 | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Write-Host "  [warn] artifact-streaming update failed for $repo. (Premium ACR required; preview in some regions.)" -ForegroundColor Yellow

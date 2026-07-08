@@ -1,0 +1,66 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "eastus"
+    },
+    "tags": {
+      "value": {
+        "workload": "contentshield",
+        "managedBy": "bicep",
+        "scenario": "eastus-gpu-smoke-test",
+        "environment": "dev"
+      }
+    },
+    "caeResourceId": {
+      "value": "/subscriptions/REPLACE_SUB_ID/resourceGroups/rg-ratio-ai-dev/providers/Microsoft.App/managedEnvironments/cae-ratio-ai-dev-eastus"
+    },
+    "gpuWorkloadProfileName": {
+      "value": "NC24-A100"
+    },
+    "acrLoginServer": {
+      "value": "ratioai.azurecr.io"
+    },
+    "imageRepository": {
+      "value": "contentshield-stage2"
+    },
+    "appInsightsConnectionString": {
+      "value": ""
+    },
+    "stage2Variants": {
+      "value": [
+        {
+          "name": "ca-cs-stage2-eastus-baked-local",
+          "tag": "1.0.1",
+          "minReplicas": 1,
+          "maxReplicas": 1,
+          "needsHfToken": false
+        },
+        {
+          "name": "ca-cs-stage2-eastus-baked",
+          "tag": "1.0.1",
+          "minReplicas": 0,
+          "maxReplicas": 1,
+          "needsHfToken": false
+        },
+        {
+          "name": "ca-cs-stage2-eastus-cache-disabled",
+          "tag": "1.0.1",
+          "minReplicas": 0,
+          "maxReplicas": 1,
+          "needsHfToken": true
+        }
+      ]
+    },
+    "targetPort": {
+      "value": 8080
+    },
+    "scalerConcurrentRequests": {
+      "value": "30"
+    },
+    "scalerCooldownSec": {
+      "value": 600
+    }
+  }
+}

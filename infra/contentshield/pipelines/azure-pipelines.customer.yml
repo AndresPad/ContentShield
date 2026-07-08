@@ -46,14 +46,6 @@ parameters:
     displayName: 'Skip stage-2 GPU app (no GPU quota)'
     type: boolean
     default: false
-  - name: syncWeights
-    displayName: 'Sync model weights ORAS artifact from vendor ACR'
-    type: boolean
-    default: false
-  - name: weightsTag
-    displayName: 'Weights artifact tag (defaults to imageTag if empty)'
-    type: string
-    default: ''
 
 variables:
   - group: contentshield-release        # variable group described above
@@ -106,58 +98,6 @@ stages:
               -VendorAcrTokenPassword "$(vendorAcrTokenPassword)"
               -Tag                    "$(imageTag)"
               -Force
-
-        # ---------------------------------------------------------------------
-        # Optional: copy the model-weights OCI artifact from the vendor ACR
-        # into the customer ACR using ORAS. Skipped unless -syncWeights=true.
-        # Required only when the hfPrewarmJob is configured with
-        # modelSource=acr-oras (Bicep param). Customers still on the HF Hub
-        # path leave this off.
-        # ---------------------------------------------------------------------
-        - task: Bash@3
-          displayName: 'Install oras CLI (for weights sync)'
-          condition: and(succeeded(), eq('${{ parameters.syncWeights }}', 'true'))
-          inputs:
-            targetType: inline
-            script: |
-              set -euo pipefail
-              ORAS_VERSION=1.2.3
-              cd "$(Agent.TempDirectory)"
-              curl -fsSL -o oras.tar.gz \
-                "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz"
-              tar -xzf oras.tar.gz oras
-              chmod +x oras
-              echo "##vso[task.prependpath]$(Agent.TempDirectory)"
-              ./oras version
-
-        - task: AzureCLI@2
-          displayName: 'Sync weights artifact (AAD)'
-          condition: and(succeeded(), eq('${{ parameters.syncWeights }}', 'true'), eq(variables['useAad'], 'true'))
-          inputs:
-            azureSubscription: $(serviceConnection)
-            scriptType: pscore
-            scriptLocation: scriptPath
-            scriptPath: infra/contentshield/scripts/sync-weights-from-vendor.ps1
-            arguments: >-
-              -TargetAcrName "contentshieldacr$(suffix)"
-              -VendorAcrFqdn "$(vendorAcrFqdn)"
-              -Tag           "${{ coalesce(parameters.weightsTag, parameters.imageTag) }}"
-              -UseAad
-
-        - task: AzureCLI@2
-          displayName: 'Sync weights artifact (scoped token)'
-          condition: and(succeeded(), eq('${{ parameters.syncWeights }}', 'true'), ne(variables['useAad'], 'true'))
-          inputs:
-            azureSubscription: $(serviceConnection)
-            scriptType: pscore
-            scriptLocation: scriptPath
-            scriptPath: infra/contentshield/scripts/sync-weights-from-vendor.ps1
-            arguments: >-
-              -TargetAcrName          "contentshieldacr$(suffix)"
-              -VendorAcrFqdn          "$(vendorAcrFqdn)"
-              -VendorAcrTokenName     "$(vendorAcrTokenName)"
-              -VendorAcrTokenPassword "$(vendorAcrTokenPassword)"
-              -Tag                    "${{ coalesce(parameters.weightsTag, parameters.imageTag) }}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 2: Deploy / roll the container apps to the new tag

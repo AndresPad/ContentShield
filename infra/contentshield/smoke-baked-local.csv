@@ -1,0 +1,2 @@
+variant,image,tsStart,scaleToReplicaSec,scaleToHealthSec,healthAttempts,firstClassifyMs,p50WarmMs,p95WarmMs,warmCount,errors
+ca-cs-stage2-baked-local,contentshieldacraxa1.azurecr.io/contentshield-stage2:gemma4-31b-model-baked-local-20260519,2026-05-20T22:54:53.3436720-04:00,766.8941496,,9,,,,0,health_timeout

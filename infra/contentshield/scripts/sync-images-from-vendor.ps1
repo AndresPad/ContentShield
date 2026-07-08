@@ -44,6 +44,13 @@
   Intended for internal-Microsoft customers where vendor + customer are in
   the same tenant. When -UseAad is set, -VendorAcrTokenName/-VendorAcrTokenPassword
   may be omitted; if supplied they are ignored.
+
+.PARAMETER DigestMap
+  Hashtable of @{ friendlyTag = 'sha256:<hex>' } pairs. When supplied, the
+  script ignores -Tag / -AllTags and imports the listed digests, retagging
+  each as ':<friendlyTag>' in the target ACR. Use this for variant-matrix
+  testing where you want to pin specific image digests under human-readable
+  names. Requires exactly one entry in -Repositories.
 #>
 [CmdletBinding()]
 param(
@@ -56,7 +63,8 @@ param(
     [switch]$AllTags,
     [switch]$Force,
     [bool]$EnableArtifactStreaming = $true,
-    [switch]$UseAad
+    [switch]$UseAad,
+    [hashtable]$DigestMap
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,6 +73,10 @@ if (-not $UseAad) {
     if (-not $VendorAcrTokenName -or -not $VendorAcrTokenPassword) {
         throw "Either pass -UseAad (AAD auth) OR both -VendorAcrTokenName and -VendorAcrTokenPassword (scoped-token auth)."
     }
+}
+
+if ($DigestMap -and $Repositories.Count -ne 1) {
+    throw "-DigestMap requires exactly one repository in -Repositories (got $($Repositories.Count): $($Repositories -join ', '))."
 }
 
 # Helper: list tags in a remote ACR repo via the Docker Registry v2 API using
@@ -138,6 +150,71 @@ function Get-NewestTag {
 }
 
 foreach ($repo in $Repositories) {
+
+    if ($DigestMap) {
+        # Digest-pinned import mode. Each entry imports a specific sha256 manifest
+        # and retags it under the human-readable friendlyTag in the target ACR.
+        # No ':latest' alias here — variant testing wants explicit, traceable tags.
+        Write-Host "  DigestMap mode: importing $($DigestMap.Count) digest(s) for $repo" -ForegroundColor Gray
+        foreach ($entry in $DigestMap.GetEnumerator()) {
+            $friendlyTag = $entry.Key
+            $digest = $entry.Value
+            if ($digest -notmatch '^sha256:[0-9a-f]{64}$') {
+                throw "DigestMap['$friendlyTag'] = '$digest' is not a valid sha256:<hex> reference."
+            }
+            $source = "${VendorAcrFqdn}/${repo}@${digest}"
+            Write-Host "  $source -> ${repo}:${friendlyTag}" -ForegroundColor Gray
+
+            $argsList = @(
+                'acr','import',
+                '-n', $TargetAcrName,
+                '--source', $source,
+                '--image', "${repo}:${friendlyTag}",
+                '--only-show-errors'
+            )
+            if (-not $UseAad) {
+                $argsList += @('--username', $VendorAcrTokenName, '--password', $VendorAcrTokenPassword)
+            }
+            if ($Force) { $argsList += '--force' }
+
+            az @argsList 2>&1 | Tee-Object -Variable importOutput | Out-Host
+            if ($LASTEXITCODE -ne 0) {
+                $msg = ($importOutput | Out-String)
+                if ($msg -match 'MANIFEST_UNKNOWN') {
+                    Write-Host "`n  >> Digest '$digest' does not exist in '$repo' on $VendorAcrFqdn." -ForegroundColor Red
+                }
+                throw "Digest import failed for $source."
+            }
+            Write-Host "  [OK] imported ${repo}@${digest} as ${repo}:${friendlyTag}" -ForegroundColor Green
+
+            if ($EnableArtifactStreaming) {
+                Write-Host "  Creating artifact-streaming manifest for ${repo}:${friendlyTag} ..." -ForegroundColor DarkGray
+                az acr artifact-streaming create `
+                    --name $TargetAcrName `
+                    --image "${repo}:${friendlyTag}" `
+                    --only-show-errors 2>&1 | Out-Host
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "    [warn] artifact-streaming create failed for ${repo}:${friendlyTag}. Continuing (ACR Premium required; preview feature in some regions)." -ForegroundColor Yellow
+                    $LASTEXITCODE = 0
+                }
+            }
+        }
+
+        # Repo-level auto-streaming flag (same as the tag-mode path).
+        if ($EnableArtifactStreaming) {
+            Write-Host "  Enabling auto artifact-streaming on repo '$repo' ..." -ForegroundColor DarkGray
+            az acr artifact-streaming update `
+                --name $TargetAcrName `
+                --repository $repo `
+                --enable-streaming True `
+                --only-show-errors 2>&1 | Out-Host
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "    [warn] artifact-streaming update failed for repo '$repo'. Continuing." -ForegroundColor Yellow
+                $LASTEXITCODE = 0
+            }
+        }
+        continue  # skip the tag-based block below for this repo
+    }
 
     # Determine which tags to import
     if ($AllTags) {
@@ -224,10 +301,11 @@ foreach ($repo in $Repositories) {
     #    every future push/import is converted without any extra step.
     if ($EnableArtifactStreaming) {
         Write-Host "  Enabling auto artifact-streaming on repo '$repo' ..." -ForegroundColor DarkGray
+        # Newer az acr CLI renamed --enable-auto-streaming -> --enable-streaming.
         az acr artifact-streaming update `
             --name $TargetAcrName `
             --repository $repo `
-            --enable-auto-streaming True `
+            --enable-streaming True `
             --only-show-errors 2>&1 | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Write-Host "    [warn] artifact-streaming update failed for repo '$repo'. Continuing." -ForegroundColor Yellow

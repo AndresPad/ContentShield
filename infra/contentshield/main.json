@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.43.8.12551",
-      "templateHash": "4099100075183317919"
+      "templateHash": "10696854050422101471"
     }
   },
   "parameters": {
@@ -320,38 +320,6 @@
         "description": "Container Apps Job name for the HF cache pre-warm."
       }
     },
-    "modelSource": {
-      "type": "string",
-      "defaultValue": "hf-hub",
-      "allowedValues": [
-        "hf-hub",
-        "acr-oras"
-      ],
-      "metadata": {
-        "description": "Source of the model weights for the pre-warm job. \"hf-hub\" downloads from huggingface.co (default, back-compat); \"acr-oras\" pulls the OCI weights artifact from the customer ACR (populated via sync-weights-from-vendor.ps1)."
-      }
-    },
-    "weightsRepository": {
-      "type": "string",
-      "defaultValue": "contentshield-stage2-weights",
-      "metadata": {
-        "description": "Repository name of the weights OCI artifact in the customer ACR (used when modelSource = \"acr-oras\")."
-      }
-    },
-    "weightsTag": {
-      "type": "string",
-      "defaultValue": "",
-      "metadata": {
-        "description": "Tag of the weights OCI artifact to pull (used when modelSource = \"acr-oras\"). If empty, falls back to stage2ImageTag."
-      }
-    },
-    "weightsInImage": {
-      "type": "bool",
-      "defaultValue": false,
-      "metadata": {
-        "description": "Use the weights-baked stage-2 image variant. When true, the stage-2 container app pulls contentshield-stage2-baked:<tag> (weights already in the image, sub-60s cold start via artifact streaming), the NFS hfcache mount is suppressed, and the HF cache pre-warm job is skipped. Requires publish-image.ps1 -WithWeights to have published the matching baked tag."
-      }
-    },
     "apimSku": {
       "type": "string",
       "defaultValue": "StandardV2",
@@ -419,9 +387,6 @@
         "description": "Client (Application) ID of the Entra app registration RatioAIDev. Exposed to container apps as RATIO_AI_DEV_CLIENT_ID."
       }
     }
-  },
-  "variables": {
-    "stage2RepoName": "[if(parameters('weightsInImage'), 'contentshield-stage2-baked', 'contentshield-stage2')]"
   },
   "resources": [
     {
@@ -1685,7 +1650,7 @@
           "stage2AppName": {
             "value": "[parameters('stage2AppName')]"
           },
-          "stage2Image": "[if(empty(parameters('stage2ImageTag')), createObject('value', parameters('stage2Image')), createObject('value', format('{0}/{1}:{2}', reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.loginServer.value, variables('stage2RepoName'), parameters('stage2ImageTag'))))]",
+          "stage2Image": "[if(empty(parameters('stage2ImageTag')), createObject('value', parameters('stage2Image')), createObject('value', format('{0}/contentshield-stage2:{1}', reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.loginServer.value, parameters('stage2ImageTag'))))]",
           "stage2TargetPort": {
             "value": "[parameters('stage2TargetPort')]"
           },
@@ -1696,7 +1661,7 @@
             "value": "[parameters('hfToken')]"
           },
           "nfsStorageMounted": {
-            "value": "[and(and(not(parameters('weightsInImage')), not(empty(if(parameters('deployStorage'), reference(resourceId('Microsoft.Resources/deployments', 'mod-storage'), '2025-04-01').outputs.fileEndpointHost.value, parameters('nfsServer'))))), not(empty(if(parameters('deployStorage'), reference(resourceId('Microsoft.Resources/deployments', 'mod-storage'), '2025-04-01').outputs.nfsSharePath.value, parameters('nfsShareName')))))]"
+            "value": "[and(not(empty(if(parameters('deployStorage'), reference(resourceId('Microsoft.Resources/deployments', 'mod-storage'), '2025-04-01').outputs.fileEndpointHost.value, parameters('nfsServer')))), not(empty(if(parameters('deployStorage'), reference(resourceId('Microsoft.Resources/deployments', 'mod-storage'), '2025-04-01').outputs.nfsSharePath.value, parameters('nfsShareName')))))]"
           },
           "storageAccountName": "[if(parameters('deployStorage'), createObject('value', reference(resourceId('Microsoft.Resources/deployments', 'mod-storage'), '2025-04-01').outputs.name.value), createObject('value', ''))]",
           "hfCacheShareName": {
@@ -2163,7 +2128,7 @@
       ]
     },
     {
-      "condition": "[and(and(and(parameters('deployHfPrewarmJob'), parameters('deployStorage')), parameters('deployStage2')), not(parameters('weightsInImage')))]",
+      "condition": "[and(and(parameters('deployHfPrewarmJob'), parameters('deployStorage')), parameters('deployStage2'))]",
       "type": "Microsoft.Resources/deployments",
       "apiVersion": "2025-04-01",
       "name": "mod-hfprewarm",
@@ -2197,20 +2162,7 @@
           },
           "appInsightsConnectionString": {
             "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-monitoring'), '2025-04-01').outputs.appInsightsConnectionString.value]"
-          },
-          "modelSource": {
-            "value": "[parameters('modelSource')]"
-          },
-          "weightsAcrName": {
-            "value": "[parameters('acrName')]"
-          },
-          "weightsAcrLoginServer": {
-            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.loginServer.value]"
-          },
-          "weightsRepository": {
-            "value": "[parameters('weightsRepository')]"
-          },
-          "weightsTag": "[if(empty(parameters('weightsTag')), createObject('value', parameters('stage2ImageTag')), createObject('value', parameters('weightsTag')))]"
+          }
         },
         "template": {
           "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
@@ -2219,7 +2171,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.43.8.12551",
-              "templateHash": "14118838182190152686"
+              "templateHash": "2908840405096302502"
             }
           },
           "parameters": {
@@ -2269,45 +2221,6 @@
                 "description": "Optional HF token for gated/private models."
               }
             },
-            "modelSource": {
-              "type": "string",
-              "defaultValue": "hf-hub",
-              "allowedValues": [
-                "hf-hub",
-                "acr-oras"
-              ],
-              "metadata": {
-                "description": "Source of the model weights. \"hf-hub\" downloads from huggingface.co (back-compat default); \"acr-oras\" pulls the OCI weights artifact from a customer ACR via the job's managed identity."
-              }
-            },
-            "weightsAcrName": {
-              "type": "string",
-              "defaultValue": "",
-              "metadata": {
-                "description": "ACR resource name holding the weights OCI artifact (required when modelSource = \"acr-oras\"). Typically the customer ACR."
-              }
-            },
-            "weightsAcrLoginServer": {
-              "type": "string",
-              "defaultValue": "",
-              "metadata": {
-                "description": "Login server FQDN of the weights ACR, e.g. contentshieldacrXXX.azurecr.io (required when modelSource = \"acr-oras\")."
-              }
-            },
-            "weightsRepository": {
-              "type": "string",
-              "defaultValue": "contentshield-stage2-weights",
-              "metadata": {
-                "description": "Repository name of the weights artifact in the customer ACR."
-              }
-            },
-            "weightsTag": {
-              "type": "string",
-              "defaultValue": "",
-              "metadata": {
-                "description": "Tag of the weights artifact to pull (required when modelSource = \"acr-oras\"). Convention: same semver as the stage-2 image tag."
-              }
-            },
             "appInsightsConnectionString": {
               "type": "string",
               "defaultValue": "",
@@ -2334,13 +2247,8 @@
           },
           "variables": {
             "hfCacheMountPath": "[format('/mount/{0}/{1}', parameters('storageAccountName'), parameters('hfCacheShareName'))]",
-            "isAcrOras": "[equals(parameters('modelSource'), 'acr-oras')]",
             "jobSecrets": "[if(empty(parameters('hfToken')), createArray(), createArray(createObject('name', 'hf-token', 'value', parameters('hfToken'))))]",
             "jobEnvBase": [
-              {
-                "name": "MODEL_SOURCE",
-                "value": "[parameters('modelSource')]"
-              },
               {
                 "name": "MODEL_NAME",
                 "value": "[parameters('model')]"
@@ -2354,24 +2262,12 @@
                 "value": "1"
               },
               {
-                "name": "WEIGHTS_ACR_FQDN",
-                "value": "[parameters('weightsAcrLoginServer')]"
-              },
-              {
-                "name": "WEIGHTS_REPOSITORY",
-                "value": "[parameters('weightsRepository')]"
-              },
-              {
-                "name": "WEIGHTS_TAG",
-                "value": "[parameters('weightsTag')]"
-              },
-              {
                 "name": "APPLICATIONINSIGHTS_CONNECTION_STRING",
                 "value": "[parameters('appInsightsConnectionString')]"
               }
             ],
             "jobEnv": "[if(empty(parameters('hfToken')), variables('jobEnvBase'), concat(createArray(createObject('name', 'HF_TOKEN', 'secretRef', 'hf-token')), variables('jobEnvBase')))]",
-            "downloadScript": "set -euo pipefail\r\necho \"[prewarm] source=$MODEL_SOURCE  model=$MODEL_NAME  cache=$HF_HOME\"\r\nmkdir -p \"$HF_HOME\"\r\ndf -h \"$HF_HOME\" || true\r\n\r\ncase \"$MODEL_SOURCE\" in\r\n  hf-hub)\r\n    echo \"[prewarm] installing huggingface_hub + hf_transfer...\"\r\n    python -m pip install --quiet --no-cache-dir --disable-pip-version-check \\\r\n        'huggingface_hub[cli]>=0.24' 'hf_transfer>=0.1.6'\r\n    echo \"[prewarm] downloading from HF Hub...\"\r\n    time huggingface-cli download \"$MODEL_NAME\" --cache-dir \"$HF_HOME\" --quiet\r\n    ;;\r\n  acr-oras)\r\n    : \"${WEIGHTS_ACR_FQDN:?WEIGHTS_ACR_FQDN must be set for acr-oras mode}\"\r\n    : \"${WEIGHTS_REPOSITORY:?WEIGHTS_REPOSITORY must be set for acr-oras mode}\"\r\n    : \"${WEIGHTS_TAG:?WEIGHTS_TAG must be set for acr-oras mode}\"\r\n    echo \"[prewarm] target artifact: $WEIGHTS_ACR_FQDN/$WEIGHTS_REPOSITORY:$WEIGHTS_TAG\"\r\n\r\n    # 1) Install oras (pinned, single binary).\r\n    ORAS_VERSION=1.2.3\r\n    echo \"[prewarm] installing oras $ORAS_VERSION...\"\r\n    tdnf install -y -q tar gzip curl ca-certificates >/dev/null 2>&1 || \\\r\n      (apt-get update -qq && apt-get install -y -qq tar gzip curl ca-certificates >/dev/null) || true\r\n    curl -fsSL -o /tmp/oras.tgz \\\r\n      \"https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz\"\r\n    tar -xzf /tmp/oras.tgz -C /usr/local/bin oras\r\n    chmod +x /usr/local/bin/oras\r\n    oras version\r\n\r\n    # 2) Exchange the job\\'s managed identity (via IMDS) for an ACR access token.\r\n    echo \"[prewarm] authenticating to $WEIGHTS_ACR_FQDN via managed identity...\"\r\n    AAD_TOKEN=$(curl -fsSL -H \"Metadata:true\" \\\r\n      \"http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://${WEIGHTS_ACR_FQDN}/\" \\\r\n      | python3 -c \"import sys,json; print(json.load(sys.stdin)['access_token'])\")\r\n    REFRESH=$(curl -fsSL -X POST \"https://$WEIGHTS_ACR_FQDN/oauth2/exchange\" \\\r\n      -d \"grant_type=access_token&service=$WEIGHTS_ACR_FQDN&access_token=$AAD_TOKEN\" \\\r\n      | python3 -c \"import sys,json; print(json.load(sys.stdin)['refresh_token'])\")\r\n    ACCESS=$(curl -fsSL -X POST \"https://$WEIGHTS_ACR_FQDN/oauth2/token\" \\\r\n      -d \"grant_type=refresh_token&service=$WEIGHTS_ACR_FQDN&scope=repository:${WEIGHTS_REPOSITORY}:pull&refresh_token=${REFRESH}\" \\\r\n      | python3 -c \"import sys,json; print(json.load(sys.stdin)['access_token'])\")\r\n    printf '%s' \"$ACCESS\" | oras login \"$WEIGHTS_ACR_FQDN\" \\\r\n      -u '00000000-0000-0000-0000-000000000000' --password-stdin\r\n\r\n    # 3) Pull the artifact (one or more tarball layers) into a staging dir.\r\n    STAGE=/tmp/weights\r\n    rm -rf \"$STAGE\" && mkdir -p \"$STAGE\"\r\n    echo \"[prewarm] pulling artifact...\"\r\n    time oras pull \"$WEIGHTS_ACR_FQDN/${WEIGHTS_REPOSITORY}:${WEIGHTS_TAG}\" -o \"$STAGE\"\r\n\r\n    # 4) Untar each layer into HF_HOME. Supports .tar.gz, .tar.zst, .tar.\r\n    echo \"[prewarm] extracting to $HF_HOME ...\"\r\n    shopt -s nullglob\r\n    for f in \"$STAGE\"/*.tar.gz \"$STAGE\"/*.tgz; do\r\n      echo \"  + $f\"\r\n      tar -xzf \"$f\" -C \"$HF_HOME\"\r\n    done\r\n    for f in \"$STAGE\"/*.tar.zst; do\r\n      echo \"  + $f (zstd)\"\r\n      # Mariner has zstd in tdnf; install on demand.\r\n      command -v zstd >/dev/null 2>&1 || tdnf install -y -q zstd >/dev/null 2>&1 || \\\r\n        apt-get install -y -qq zstd >/dev/null 2>&1 || true\r\n      tar --use-compress-program=unzstd -xf \"$f\" -C \"$HF_HOME\"\r\n    done\r\n    for f in \"$STAGE\"/*.tar; do\r\n      echo \"  + $f\"\r\n      tar -xf \"$f\" -C \"$HF_HOME\"\r\n    done\r\n    rm -rf \"$STAGE\"\r\n    ;;\r\n  *)\r\n    echo \"[prewarm] ERROR: unknown MODEL_SOURCE=$MODEL_SOURCE\" >&2\r\n    exit 2\r\n    ;;\r\nesac\r\n\r\necho \"[prewarm] done. footprint:\"\r\ndu -sh \"$HF_HOME\" || true\r\n"
+            "downloadScript": "set -euo pipefail\r\necho \"[prewarm] model=$MODEL_NAME\"\r\necho \"[prewarm] cache=$HF_HOME\"\r\nmkdir -p \"$HF_HOME\"\r\ndf -h \"$HF_HOME\" || true\r\necho \"[prewarm] installing huggingface_hub + hf_transfer...\"\r\npython -m pip install --quiet --no-cache-dir --disable-pip-version-check \\\r\n    'huggingface_hub[cli]>=0.24' 'hf_transfer>=0.1.6'\r\necho \"[prewarm] downloading...\"\r\ntime huggingface-cli download \"$MODEL_NAME\" --cache-dir \"$HF_HOME\" --quiet\r\necho \"[prewarm] done. footprint:\"\r\ndu -sh \"$HF_HOME\" || true\r\n"
           },
           "resources": [
             {
@@ -2428,21 +2324,6 @@
                   ]
                 }
               }
-            },
-            {
-              "condition": "[and(variables('isAcrOras'), not(empty(parameters('weightsAcrName'))))]",
-              "type": "Microsoft.Authorization/roleAssignments",
-              "apiVersion": "2022-04-01",
-              "scope": "[resourceId('Microsoft.ContainerRegistry/registries', parameters('weightsAcrName'))]",
-              "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', parameters('weightsAcrName')), resourceId('Microsoft.App/jobs', parameters('jobName')), '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
-              "properties": {
-                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
-                "principalId": "[reference(resourceId('Microsoft.App/jobs', parameters('jobName')), '2024-10-02-preview', 'full').identity.principalId]",
-                "principalType": "ServicePrincipal"
-              },
-              "dependsOn": [
-                "[resourceId('Microsoft.App/jobs', parameters('jobName'))]"
-              ]
             }
           ],
           "outputs": {
@@ -2457,16 +2338,11 @@
             "mountPath": {
               "type": "string",
               "value": "[variables('hfCacheMountPath')]"
-            },
-            "modelSource": {
-              "type": "string",
-              "value": "[parameters('modelSource')]"
             }
           }
         }
       },
       "dependsOn": [
-        "[resourceId('Microsoft.Resources/deployments', 'mod-acr')]",
         "[resourceId('Microsoft.Resources/deployments', 'mod-apps')]",
         "[resourceId('Microsoft.Resources/deployments', 'mod-cae')]",
         "[resourceId('Microsoft.Resources/deployments', 'mod-monitoring')]",
@@ -3002,7 +2878,7 @@
     },
     "hfPrewarmJobName": {
       "type": "string",
-      "value": "[if(and(and(and(parameters('deployHfPrewarmJob'), parameters('deployStorage')), parameters('deployStage2')), not(parameters('weightsInImage'))), reference(resourceId('Microsoft.Resources/deployments', 'mod-hfprewarm'), '2025-04-01').outputs.jobName.value, '')]"
+      "value": "[if(and(and(parameters('deployHfPrewarmJob'), parameters('deployStorage')), parameters('deployStage2')), reference(resourceId('Microsoft.Resources/deployments', 'mod-hfprewarm'), '2025-04-01').outputs.jobName.value, '')]"
     }
   }
 }

@@ -142,6 +142,9 @@ param gpuWorkloadProfileType string = 'Consumption-GPU-NC24-A100'
 @description('Deploy the stage-2 GPU container app. Set false to skip (e.g., during initial testing if GPU quota unavailable).')
 param deployStage2 bool = true
 
+@description('Variant matrix for Stage-2. When this array is non-empty, the legacy single Stage-2 app in modules/containerApps.bicep is skipped and one Microsoft.App/containerApps resource is created per entry via modules/stage2App.bicep. Each entry shape: { name, repo, friendlyTag (or digest), mountNfs, minReplicas, maxReplicas, hfToken (string, optional), extraEnv (array, optional) }. The image reference is built as <acrLoginServer>/<repo>:<friendlyTag>. Pin by digest by importing under a friendly tag (see scripts/sync-images-from-vendor.ps1 -DigestMap) and then reference that friendlyTag here.')
+param stage2Variants array = []
+
 @description('Extra IP CIDR ranges to add to stage-2 ingress allowlist (e.g., the stage-2 app outbound IP after first deploy).')
 param extraStage2AllowedIps array = []
 
@@ -169,22 +172,6 @@ param deployHfPrewarmJob bool = true
 
 @description('Container Apps Job name for the HF cache pre-warm.')
 param hfPrewarmJobName string = 'job-hf-prewarm'
-
-@description('Source of the model weights for the pre-warm job. "hf-hub" downloads from huggingface.co (default, back-compat); "acr-oras" pulls the OCI weights artifact from the customer ACR (populated via sync-weights-from-vendor.ps1).')
-@allowed([
-  'hf-hub'
-  'acr-oras'
-])
-param modelSource string = 'hf-hub'
-
-@description('Repository name of the weights OCI artifact in the customer ACR (used when modelSource = "acr-oras").')
-param weightsRepository string = 'contentshield-stage2-weights'
-
-@description('Tag of the weights OCI artifact to pull (used when modelSource = "acr-oras"). If empty, falls back to stage2ImageTag.')
-param weightsTag string = ''
-
-@description('Use the weights-baked stage-2 image variant. When true, the stage-2 container app pulls contentshield-stage2-baked:<tag> (weights already in the image, sub-60s cold start via artifact streaming), the NFS hfcache mount is suppressed, and the HF cache pre-warm job is skipped. Requires publish-image.ps1 -WithWeights to have published the matching baked tag.')
-param weightsInImage bool = false
 
 // ── APIM ────────────────────────────────────────────────────────────────────
 
@@ -302,15 +289,8 @@ module acr 'modules/acr.bicep' = {
 // otherwise fall back to the explicit appImage / stage2Image (placeholder or
 // hand-set value). Keeps two-phase deploy working: phase 1 uses defaults,
 // phase 2 supplies tags after import.
-//
-// When weightsInImage=true, stage-2 swaps to the contentshield-stage2-baked
-// repo (weights pre-baked into the image, no NFS needed).
 var effectiveAppImage = empty(appImageTag) ? appImage : '${acr.outputs.loginServer}/contentshield:${appImageTag}'
-var stage2RepoName = weightsInImage ? 'contentshield-stage2-baked' : 'contentshield-stage2'
-var effectiveStage2Image = empty(stage2ImageTag) ? stage2Image : '${acr.outputs.loginServer}/${stage2RepoName}:${stage2ImageTag}'
-
-// NFS mount is irrelevant for the baked variant (weights live on local SSD).
-var nfsStorageMountedEffective = !weightsInImage && !empty(effectiveNfsServer) && !empty(effectiveNfsShareName)
+var effectiveStage2Image = empty(stage2ImageTag) ? stage2Image : '${acr.outputs.loginServer}/contentshield-stage2:${stage2ImageTag}'
 
 // 5. Container Apps Environment (depends on network + monitoring)
 module cae 'modules/containerAppsEnv.bicep' = {
@@ -329,6 +309,11 @@ module cae 'modules/containerAppsEnv.bicep' = {
     nfsShareName: effectiveNfsShareName
   }
 }
+
+// Variant-matrix flag. When true (stage2Variants is non-empty), the legacy
+// single-Stage-2 path in modules/containerApps.bicep is suppressed and we
+// instantiate modules/stage2App.bicep once per entry below.
+var useStage2Variants = !empty(stage2Variants)
 
 // 6. Container Apps (depends on CAE + ACR + Content Safety)
 module apps 'modules/containerApps.bicep' = {
@@ -351,20 +336,51 @@ module apps 'modules/containerApps.bicep' = {
     extraStage2AllowedIps: extraStage2AllowedIps
     slmModel: slmModel
     contentshieldV1MlDisabled: contentshieldV1MlDisabled
-    deployStage2: deployStage2
+    deployStage2: deployStage2 && !useStage2Variants
     stage2AppName: stage2AppName
     stage2Image: effectiveStage2Image
     stage2TargetPort: stage2TargetPort
     gpuWorkloadProfileName: gpuWorkloadProfileName
     hfToken: hfToken
-    nfsStorageMounted: nfsStorageMountedEffective
+    nfsStorageMounted: !empty(effectiveNfsServer) && !empty(effectiveNfsShareName)
     storageAccountName: effectiveStorageAccountName
     hfCacheShareName: hfCacheShareName
   }
 }
 
+// 6c. Stage-2 variant matrix. One Container App per entry in stage2Variants[].
+//     Each variant inherits the image's own MODEL_NAME/HF_HOME/PROMPT_PATH env;
+//     this module only injects tuneables + observability + optional HF_TOKEN +
+//     caller-supplied extraEnv. See modules/stage2App.bicep header for details.
+module stage2Apps 'modules/stage2App.bicep' = [for (v, i) in stage2Variants: if (deployStage2 && useStage2Variants) {
+  name: 'mod-stage2-${i}'
+  params: {
+    location: location
+    tags: tags
+    caeName: cae.outputs.name
+    acrLoginServer: acr.outputs.loginServer
+    appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
+    natGatewayPublicIp: network.outputs.natGatewayPublicIp
+    caeStaticIp: cae.outputs.staticIp
+    extraAllowedIps: extraStage2AllowedIps
+    name: v.name
+    image: '${acr.outputs.loginServer}/${v.repo}:${v.friendlyTag}'
+    gpuWorkloadProfileName: gpuWorkloadProfileName
+    targetPort: contains(v, 'targetPort') ? v.targetPort : stage2TargetPort
+    mountNfs: contains(v, 'mountNfs') ? v.mountNfs : false
+    storageAccountName: effectiveStorageAccountName
+    hfCacheShareName: hfCacheShareName
+    minReplicas: contains(v, 'minReplicas') ? v.minReplicas : 0
+    maxReplicas: contains(v, 'maxReplicas') ? v.maxReplicas : 1
+    hfToken: contains(v, 'hfToken') ? v.hfToken : ''
+    extraEnv: contains(v, 'extraEnv') ? v.extraEnv : []
+    scalerConcurrentRequests: contains(v, 'scalerConcurrentRequests') ? v.scalerConcurrentRequests : '30'
+    scalerCooldownSec: contains(v, 'scalerCooldownSec') ? v.scalerCooldownSec : 600
+  }
+}]
+
 // 6b. HF cache pre-warm job (manual-trigger; fired by deploy.ps1 post-deploy)
-module hfPrewarmJob 'modules/hfPrewarmJob.bicep' = if (deployHfPrewarmJob && deployStorage && deployStage2 && !weightsInImage) {
+module hfPrewarmJob 'modules/hfPrewarmJob.bicep' = if (deployHfPrewarmJob && deployStorage && deployStage2) {
   name: 'mod-hfprewarm'
   params: {
     location: location
@@ -376,11 +392,6 @@ module hfPrewarmJob 'modules/hfPrewarmJob.bicep' = if (deployHfPrewarmJob && dep
     hfCacheShareName: hfCacheShareName
     hfToken: hfToken
     appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
-    modelSource: modelSource
-    weightsAcrName: acrName
-    weightsAcrLoginServer: acr.outputs.loginServer
-    weightsRepository: weightsRepository
-    weightsTag: empty(weightsTag) ? stage2ImageTag : weightsTag
   }
   dependsOn: [
     apps
@@ -427,10 +438,21 @@ output appFqdn string = apps.outputs.appFqdn
 output appPrincipalId string = apps.outputs.appPrincipalId
 output stage2Fqdn string = apps.outputs.stage2Fqdn
 output stage2PrincipalId string = apps.outputs.stage2PrincipalId
+output stage2Variants array = [for (v, i) in stage2Variants: (deployStage2 && useStage2Variants) ? {
+  name: stage2Apps[i]!.outputs.name
+  fqdn: stage2Apps[i]!.outputs.fqdn
+  principalId: stage2Apps[i]!.outputs.principalId
+  image: '${acr.outputs.loginServer}/${v.repo}:${v.friendlyTag}'
+} : {
+  name: v.name
+  fqdn: ''
+  principalId: ''
+  image: ''
+}]
 output apimGatewayUrl string = deployApim ? apim!.outputs.gatewayUrl : ''
 output apimPrincipalId string = deployApim ? apim!.outputs.principalId : ''
 output storageAccountName string = deployStorage ? storage!.outputs.name : ''
 output storageNfsHost string = deployStorage ? storage!.outputs.fileEndpointHost : ''
 output storageNfsSharePath string = deployStorage ? storage!.outputs.nfsSharePath : ''
 output hfCacheMountPath string = deployStorage ? '/mount/${storage!.outputs.name}/${hfCacheShareName}' : ''
-output hfPrewarmJobName string = (deployHfPrewarmJob && deployStorage && deployStage2 && !weightsInImage) ? hfPrewarmJob!.outputs.jobName : ''
+output hfPrewarmJobName string = (deployHfPrewarmJob && deployStorage && deployStage2) ? hfPrewarmJob!.outputs.jobName : ''

@@ -52,6 +52,7 @@ VLLM_PID=$!
 trap 'echo "stopping vLLM ($VLLM_PID)"; kill -TERM $VLLM_PID 2>/dev/null || true; wait $VLLM_PID 2>/dev/null || true' SIGINT SIGTERM EXIT
 
 # Foreground: FastAPI wrapper. Wrapper /health probes vLLM until it warms up.
-export VLLM_URL="http://127.0.0.1:${VLLM_PORT}"
+export VLLM_URL="${VLLM_URL:-http://127.0.0.1:${VLLM_PORT}}"
+export VLLM_HEALTH_URL="${VLLM_HEALTH_URL:-${VLLM_URL%/}/health}"
 export MODEL_NAME
 exec uvicorn stage2.main:app --host "$HOST" --port "$WRAPPER_PORT" --log-level info

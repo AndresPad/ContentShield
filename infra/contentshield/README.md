@@ -60,6 +60,51 @@ az group create -n rg-contentshield -l westus3   # only if missing
 .\deploy.ps1 -ResourceGroup rg-contentshield -ApimPublisherEmail you@contoso.com
 ```
 
+## Side deployment — eastus GPU smoke test
+
+A second, focused template ([`eastus-gpu-test.bicep`](./eastus-gpu-test.bicep)) deploys **only** the Stage-2 Container Apps into the **existing** `cae-ratio-ai-dev-eastus` Container Apps Environment (in `rg-ratio-ai-dev`) so you can validate the recently-granted *"Managed Environment Consumption NCA100 GPUs"* quota in eastus end-to-end without touching the production westus3 stack.
+
+What it does **not** create: CAE, VNet, ACR, storage, APIM, Log Analytics. It reuses the existing eastus environment.
+
+```powershell
+# Optional one-time: grant the eastus CAE managed identity AcrPull on ratioai.azurecr.io
+$envMiPid = az containerapp env show -g rg-ratio-ai-dev -n cae-ratio-ai-dev-eastus --query 'identity.principalId' -o tsv
+$acrId    = az acr show --name ratioai --query id -o tsv
+az role assignment create --assignee-object-id $envMiPid --assignee-principal-type ServicePrincipal `
+    --role AcrPull --scope $acrId
+
+# Deploy the three Stage-2 variants pinned to ratioai.azurecr.io/contentshield-stage2:1.0.1
+.\deploy-eastus-gpu-test.ps1 -ResourceGroup rg-contentshield
+
+# Or pin all three variants to a different tag:
+.\deploy-eastus-gpu-test.ps1 -ResourceGroup rg-contentshield -ImageTag '1.0.1'
+
+# Cache-disabled variant downloads from HF Hub on first start — pass a token:
+.\deploy-eastus-gpu-test.ps1 -ResourceGroup rg-contentshield -HfToken (Get-Content .\.hf-token -Raw).Trim()
+```
+
+Resulting Container Apps (in `rg-contentshield`, region `eastus`, pinned to the eastus CAE):
+
+| Name | Image | Workload profile | minReplicas |
+|------|-------|------------------|-------------|
+| `ca-cs-stage2-eastus-baked-local`    | `ratioai.azurecr.io/contentshield-stage2:1.0.1` | `NC24-A100` | 1 (warm GPU pinned for quota validation) |
+| `ca-cs-stage2-eastus-baked`          | `ratioai.azurecr.io/contentshield-stage2:1.0.1` | `NC24-A100` | 0 |
+| `ca-cs-stage2-eastus-cache-disabled` | `ratioai.azurecr.io/contentshield-stage2:1.0.1` | `NC24-A100` | 0 (needs `HF_TOKEN`) |
+
+Pre-flight notes:
+
+* The CAE must already have a workload profile of type `Consumption-GPU-NC24-A100` (default name `NC24-A100`). The deploy script will warn and list current profiles if the name doesn't match.
+* The eastus CAE's system MI must have `AcrPull` on `ratioai.azurecr.io` (one-time grant above).
+* Container Apps live in `rg-contentshield` per request, but the CAE id (in `rg-ratio-ai-dev`) is what determines region, networking, and storage.
+
+Tear down (without touching the CAE):
+
+```powershell
+az containerapp delete -g rg-contentshield -n ca-cs-stage2-eastus-baked-local    --yes
+az containerapp delete -g rg-contentshield -n ca-cs-stage2-eastus-baked          --yes
+az containerapp delete -g rg-contentshield -n ca-cs-stage2-eastus-cache-disabled --yes
+```
+
 ## Reset (delete everything inside the RG)
 
 ```powershell
