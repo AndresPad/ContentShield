@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from typing import Any, ClassVar
 
 import httpx
@@ -31,8 +32,48 @@ def _response(status_code: int, body: dict[str, Any] | None = None) -> httpx.Res
     return httpx.Response(status_code, json=body, request=request)
 
 
-def _stage2_body(content: str | None) -> dict[str, Any]:
-    return {"choices": [{"message": {"content": content}}]}
+def _logprobs_block(
+    label: str = "NO",
+    *,
+    lp_yes: float = -2.0,
+    lp_no: float = -0.1,
+    extra_tokens: tuple[tuple[str, float], ...] = (),
+) -> dict[str, Any]:
+    sampled = label.strip().upper()
+    sampled_lp = lp_yes if sampled == "YES" else lp_no
+    other_label = "NO" if sampled == "YES" else "YES"
+    other_lp = lp_no if sampled == "YES" else lp_yes
+    top_logprobs = [
+        {"token": sampled, "logprob": sampled_lp},
+        {"token": other_label, "logprob": other_lp},
+    ]
+    for token, lp in extra_tokens:
+        top_logprobs.append({"token": token, "logprob": lp})
+    return {
+        "content": [
+            {
+                "token": label,
+                "logprob": sampled_lp,
+                "top_logprobs": top_logprobs,
+            }
+        ]
+    }
+
+
+def _stage2_body(
+    content: str | None,
+    *,
+    logprobs: dict[str, Any] | None | object = ...,
+) -> dict[str, Any]:
+    choice: dict[str, Any] = {"message": {"content": content}}
+    if logprobs is ...:
+        if isinstance(content, str):
+            label = content.strip().split(None, 1)[0].strip().upper() if content.strip() else "NO"
+            if label in {"YES", "NO"}:
+                choice["logprobs"] = _logprobs_block(label)
+    elif logprobs is not None:
+        choice["logprobs"] = logprobs
+    return {"choices": [choice]}
 
 
 def _guided_content(label: str = "NO", reason: str | None = None) -> str:
@@ -45,6 +86,7 @@ def _classify_body(
     injection: bool | None = None,
     label: str | None = None,
     reason: str | None = "",
+    score: float | None = None,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {}
     if injection is not None:
@@ -53,6 +95,8 @@ def _classify_body(
         body["label"] = label
     if reason is not None:
         body["reason"] = reason
+    if score is not None:
+        body["score"] = score
     return body
 
 
@@ -99,10 +143,11 @@ def test_missing_config_returns_skipped(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.mark.parametrize("content", ["YES", " yes "])
 def test_yes_maps_to_completed_positive(content: str):
-    _FakeAsyncClient.response = _response(
-        200,
-        _stage2_body(_guided_content("YES")),
+    body = _stage2_body(
+        _guided_content("YES"),
+        logprobs=_logprobs_block("YES", lp_yes=-0.05, lp_no=-3.0),
     )
+    _FakeAsyncClient.response = _response(200, body)
 
     result = _run()
 
@@ -110,24 +155,27 @@ def test_yes_maps_to_completed_positive(content: str):
     assert result.status == DetectorStatus.COMPLETED
     assert result.detected is True
     assert result.label == "INJECTION"
-    assert result.score == 1.0
+    assert 0.5 < result.score < 1.0
+    assert math.isclose(result.score, math.exp(-0.05) / (math.exp(-0.05) + math.exp(-3.0)))
     assert result.attack_type == "prompt_injection"
     assert result.reason == ""
 
 
 @pytest.mark.parametrize("content", ["NO", " no "])
 def test_no_maps_to_completed_negative(content: str):
-    _FakeAsyncClient.response = _response(
-        200,
-        _stage2_body(_guided_content("NO")),
+    body = _stage2_body(
+        _guided_content("NO"),
+        logprobs=_logprobs_block("NO", lp_yes=-3.0, lp_no=-0.05),
     )
+    _FakeAsyncClient.response = _response(200, body)
 
     result = _run()
 
     assert result.status == DetectorStatus.COMPLETED
     assert result.detected is False
     assert result.label == "SAFE"
-    assert result.score == 0.0
+    assert 0.0 < result.score < 0.5
+    assert math.isclose(result.score, math.exp(-3.0) / (math.exp(-3.0) + math.exp(-0.05)))
     assert result.attack_type is None
     assert result.reason == ""
 
@@ -154,24 +202,91 @@ def test_request_uses_chat_completions_endpoint_and_expected_payload():
     assert call["json"]["temperature"] == 0.0
     assert call["json"]["max_tokens"] == 512
     assert call["json"]["guided_choice"] == ["YES", "NO"]
+    assert call["json"]["logprobs"] is True
+    assert call["json"]["top_logprobs"] == 5
     assert "guided_regex" not in call["json"]
     assert "guided_json" not in call["json"]
     assert "chat_template_kwargs" not in call["json"]
 
 
+def test_softmax_score_handles_leading_space_tokens():
+    _FakeAsyncClient.response = _response(
+        200,
+        _stage2_body(
+            " YES",
+            logprobs={
+                "content": [
+                    {
+                        "token": " YES",
+                        "logprob": -0.2,
+                        "top_logprobs": [
+                            {"token": " YES", "logprob": -0.2},
+                            {"token": " NO", "logprob": -1.6},
+                        ],
+                    }
+                ]
+            },
+        ),
+    )
+
+    result = _run()
+
+    assert result.status == DetectorStatus.COMPLETED
+    assert result.detected is True
+    assert math.isclose(
+        result.score,
+        math.exp(-0.2) / (math.exp(-0.2) + math.exp(-1.6)),
+    )
+
+
 @pytest.mark.parametrize(
-    ("body", "expected_detected"),
+    "logprobs",
     [
-        (_classify_body(injection=True, label="YES"), True),
-        (_classify_body(injection=False, label="NO"), False),
-        (_classify_body(injection=True), True),
-        (_classify_body(label=" yes "), True),
-        (_classify_body(label=" no "), False),
+        None,
+        {"content": []},
+        {"content": [{"token": "YES", "logprob": -0.1, "top_logprobs": []}]},
+        {
+            "content": [
+                {
+                    "token": "YES",
+                    "logprob": -0.1,
+                    "top_logprobs": [
+                        {"token": "MAYBE", "logprob": -1.0},
+                    ],
+                }
+            ]
+        },
+    ],
+)
+def test_missing_or_malformed_logprobs_fails_closed(logprobs):
+    _FakeAsyncClient.response = _response(
+        200,
+        _stage2_body("YES", logprobs=logprobs),
+    )
+
+    result = _run()
+
+    assert result.status == DetectorStatus.FAILED
+    assert result.detected is False
+    assert result.score == 0.0
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_detected", "expected_score"),
+    [
+        (_classify_body(injection=True, label="YES"), True, 1.0),
+        (_classify_body(injection=False, label="NO"), False, 0.0),
+        (_classify_body(injection=True), True, 1.0),
+        (_classify_body(label=" yes "), True, 1.0),
+        (_classify_body(label=" no "), False, 0.0),
+        (_classify_body(injection=True, label="YES", score=0.83), True, 0.83),
+        (_classify_body(injection=False, label="NO", score=0.07), False, 0.07),
     ],
 )
 def test_configured_classify_path_uses_text_payload_and_parses_response(
     body: dict[str, Any],
     expected_detected: bool,
+    expected_score: float,
     monkeypatch: pytest.MonkeyPatch,
 ):
     monkeypatch.setattr(
@@ -186,6 +301,7 @@ def test_configured_classify_path_uses_text_payload_and_parses_response(
     assert result.status == DetectorStatus.COMPLETED
     assert result.detected is expected_detected
     assert result.label == ("INJECTION" if expected_detected else "SAFE")
+    assert result.score == expected_score
     assert result.reason == ""
     assert _FakeAsyncClient.calls == [
         {

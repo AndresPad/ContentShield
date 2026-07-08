@@ -7,8 +7,10 @@ Loads the v6 prompt at startup, exposes a clean POST /classify contract.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from contextlib import asynccontextmanager
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -29,13 +31,13 @@ REASON_PROMPT_PATH = os.environ.get(
     "REASON_PROMPT_PATH", "/workspace/prompts/pi-reason-v1.txt"
 )
 REASON_PROMPT_TEXT = os.environ.get("REASON_PROMPT_TEXT")
-ENABLE_STAGE2_REASON = os.environ.get("ENABLE_STAGE2_REASON", "false").strip().lower() in {
+ENABLE_STAGE2_REASON = os.environ.get("ENABLE_STAGE2_REASON", "true").strip().lower() in {
     "1",
     "true",
     "yes",
 }
-_MAX_REASON_TOKENS_RAW = os.environ.get("MAX_REASON_TOKENS", "64")
-MAX_REASON_TOKENS = 64
+_MAX_REASON_TOKENS_RAW = os.environ.get("MAX_REASON_TOKENS", "256")
+MAX_REASON_TOKENS = 256
 if ENABLE_STAGE2_REASON:
     try:
         MAX_REASON_TOKENS = int(_MAX_REASON_TOKENS_RAW)
@@ -43,13 +45,6 @@ if ENABLE_STAGE2_REASON:
         raise RuntimeError(
             f"Invalid MAX_REASON_TOKENS={_MAX_REASON_TOKENS_RAW!r}; must be an integer"
         ) from exc
-_MAX_CLASSIFY_TOKENS_RAW = os.environ.get("MAX_CLASSIFY_TOKENS", "512")
-try:
-    MAX_CLASSIFY_TOKENS = int(_MAX_CLASSIFY_TOKENS_RAW)
-except ValueError as exc:
-    raise RuntimeError(
-        f"Invalid MAX_CLASSIFY_TOKENS={_MAX_CLASSIFY_TOKENS_RAW!r}; must be an integer"
-    ) from exc
 
 
 class ClassifyRequest(BaseModel):
@@ -59,24 +54,80 @@ class ClassifyRequest(BaseModel):
 
 
 class ClassifyResponse(BaseModel):
-    """Binary Stage-2 classification result."""
+    """Stage-2 classification result with probabilistic injection score."""
 
     injection: bool
     label: str  # "YES" | "NO"
+    score: float = Field(..., ge=0.0, le=1.0)  # P(YES) from softmax over YES/NO logprobs
     reason: str = Field(default="", max_length=200)
+
+
+class _LogprobError(Exception):
+    """Raised when YES/NO logprobs cannot be extracted from a vLLM response."""
 
 
 _state: dict[str, object] = {}
 
 
-def _completion_extra_body() -> dict[str, object]:
-    return {"guided_choice": ["YES", "NO"]}
+def _normalize_token(token: str) -> str:
+    return token.strip(" \t\r\n.,;:!?\"'`()[]{}").upper()
 
 
-def _parse_label(content: str) -> str | None:
-    first_token = content.strip().split(None, 1)[0] if content.strip() else ""
-    normalized = first_token.strip(" \t\r\n.,;:!?\"'`()[]{}").upper()
-    return normalized if normalized in {"YES", "NO"} else None
+def _extract_yes_no_logprobs(choice: Any) -> tuple[float, float]:
+    """Pull YES/NO logprobs from the first generated token.
+
+    The classifier prompt makes YES/NO the dominant first-token candidates, so
+    both usually appear in the sampled token and/or top_logprobs of a single
+    call. vLLM can still report only the sampled constrained token; in that
+    case the other probability is the complement, so represent it as log(0).
+    Returns (lp_yes, lp_no). Raises _LogprobError when neither is available.
+    """
+    logprobs = getattr(choice, "logprobs", None)
+    if logprobs is None:
+        raise _LogprobError("logprobs missing from response")
+
+    content = getattr(logprobs, "content", None)
+    if not content:
+        raise _LogprobError("logprobs.content missing or empty")
+
+    first = content[0]
+    candidates: dict[str, float] = {}
+
+    sampled_token = getattr(first, "token", None)
+    sampled_logprob = getattr(first, "logprob", None)
+    if isinstance(sampled_token, str) and isinstance(sampled_logprob, (int, float)):
+        normalized = _normalize_token(sampled_token)
+        if normalized in {"YES", "NO"}:
+            candidates[normalized] = float(sampled_logprob)
+
+    for entry in getattr(first, "top_logprobs", None) or []:
+        token = getattr(entry, "token", None)
+        lp = getattr(entry, "logprob", None)
+        if not isinstance(token, str) or not isinstance(lp, (int, float)):
+            continue
+        normalized = _normalize_token(token)
+        if normalized in {"YES", "NO"} and normalized not in candidates:
+            candidates[normalized] = float(lp)
+
+    if "YES" in candidates and "NO" not in candidates:
+        return candidates["YES"], -math.inf
+    if "NO" in candidates and "YES" not in candidates:
+        return -math.inf, candidates["NO"]
+
+    if "YES" not in candidates or "NO" not in candidates:
+        raise _LogprobError(
+            f"top_logprobs missing YES or NO: found={sorted(candidates)}"
+        )
+
+    return candidates["YES"], candidates["NO"]
+
+
+def _softmax_two(lp_yes: float, lp_no: float) -> float:
+    """Numerically stable softmax over two logprobs; returns P(YES)."""
+    m = max(lp_yes, lp_no)
+    e_yes = math.exp(lp_yes - m)
+    e_no = math.exp(lp_no - m)
+    return e_yes / (e_yes + e_no)
 
 
 def _clean_reason(content: str) -> str:
@@ -145,7 +196,7 @@ async def health() -> dict[str, str]:
 
 @app.post("/classify", response_model=ClassifyResponse)
 async def classify(req: ClassifyRequest) -> ClassifyResponse:
-    """Classify user text as prompt injection or safe content."""
+    """Classify user text and return label + P(YES) probabilistic score."""
     client: AsyncOpenAI = _state["client"]  # type: ignore[assignment]
     system_prompt: str = _state["system_prompt"]  # type: ignore[assignment]
 
@@ -157,23 +208,36 @@ async def classify(req: ClassifyRequest) -> ClassifyResponse:
                 {"role": "user", "content": req.text},
             ],
             temperature=0.0,
-            max_tokens=MAX_CLASSIFY_TOKENS,
-            extra_body=_completion_extra_body(),
+            max_tokens=1,
+            logprobs=True,
+            top_logprobs=20,
         )
     except Exception as exc:
         logger.exception("vLLM call failed")
         raise HTTPException(502, detail="vllm_call_failed") from exc
 
-    content = resp.choices[0].message.content or ""
-    label = _parse_label(content)
+    choice = resp.choices[0]
+
+    # Single-call probabilistic scoring: both YES and NO logprobs are read from
+    # this one call's first-token top_logprobs, and P(NO) is simply 1 - P(YES)
+    # via the two-way softmax — no extra model calls. guided_choice is omitted on
+    # purpose: it masks the non-sampled token's logprob, which is what previously
+    # forced two extra prompt-logprob calls (one per candidate) on every request.
+    try:
+        lp_yes, lp_no = _extract_yes_no_logprobs(choice)
+    except _LogprobError as exc:
+        # Fail closed: do NOT default to SAFE — surface the error so the wrapper
+        # records this detector as FAILED rather than silently passing benign.
+        logger.error("Stage2 logprob extraction failed: %s", exc)
+        raise HTTPException(502, detail="logprobs_unavailable") from exc
+
+    score = _softmax_two(lp_yes, lp_no)
+    label = "YES" if lp_yes >= lp_no else "NO"
+
     if label == "YES":
         reason = await _generate_reason(req.text, client)
-        return ClassifyResponse(injection=True, label="YES", reason=reason)
-    if label == "NO":
-        return ClassifyResponse(injection=False, label="NO", reason="")
-
-    logger.error("Stage2 invalid response: %r", content)
-    raise HTTPException(502, detail="invalid_response")
+        return ClassifyResponse(injection=True, label="YES", score=score, reason=reason)
+    return ClassifyResponse(injection=False, label="NO", score=score, reason="")
 
 
 async def _generate_reason(text: str, client: AsyncOpenAI) -> str:

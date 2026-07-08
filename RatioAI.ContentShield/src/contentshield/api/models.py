@@ -7,9 +7,9 @@ are stdlib dataclasses.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
 
 # -- Request --
 
@@ -47,6 +47,12 @@ class DetectRequest(BaseModel):
 
 # -- Response --
 
+class LatencyEnvelope(BaseModel):
+    """Top-level latency envelope. Emitted only when ``X-Include-Latency`` is set."""
+
+    end_to_end: int
+
+
 class DetectorEvidence(BaseModel):
     """Compact per-detector evidence in the response."""
 
@@ -55,6 +61,17 @@ class DetectorEvidence(BaseModel):
     status: Literal["completed", "failed", "timed_out", "skipped"]
     attack_type: str | None = None
     reason: str | None = None
+    # Per-detector wall-clock latency. Emitted only when the caller sent
+    # ``X-Include-Latency``; otherwise dropped at serialization so the v1.0.1
+    # response stays byte-identical for legacy consumers.
+    latency_ms: int | None = None
+
+    @model_serializer(mode="wrap")
+    def _drop_none_latency(self, handler) -> dict[str, Any]:
+        data = handler(self)
+        if data.get("latency_ms") is None:
+            data.pop("latency_ms", None)
+        return data
 
 
 class DetectResponse(BaseModel):
@@ -71,6 +88,15 @@ class DetectResponse(BaseModel):
     degraded: bool
     attack_types: list[str] = Field(default_factory=list)
     detectors: dict[str, DetectorEvidence]
+    # See ``DetectorEvidence.latency_ms``: only present when opt-in header is set.
+    latency_ms: LatencyEnvelope | None = None
+
+    @model_serializer(mode="wrap")
+    def _drop_none_latency(self, handler) -> dict[str, Any]:
+        data = handler(self)
+        if data.get("latency_ms") is None:
+            data.pop("latency_ms", None)
+        return data
 
 
 # -- Health --

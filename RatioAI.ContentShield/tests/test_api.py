@@ -236,6 +236,41 @@ class TestDetect:
         assert client.post("/v1/detect", json={}).status_code == 422
 
 
+class TestLatencyHeader:
+    """``X-Include-Latency`` is opt-in; the v1.0.1 response shape is the default."""
+
+    def test_default_no_latency_keys_anywhere(self, client):
+        body = client.post("/v1/detect", json={"text": "hello"}).json()
+        assert "latency_ms" not in body
+        for evidence in body["detectors"].values():
+            assert "latency_ms" not in evidence
+
+    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "Yes", "yes"])
+    def test_header_opt_in_emits_envelope_and_per_detector(self, client, value):
+        body = client.post(
+            "/v1/detect",
+            json={"text": "hello"},
+            headers={"X-Include-Latency": value},
+        ).json()
+        assert "latency_ms" in body
+        assert set(body["latency_ms"].keys()) == {"end_to_end"}
+        assert isinstance(body["latency_ms"]["end_to_end"], int)
+        for evidence in body["detectors"].values():
+            assert "latency_ms" in evidence
+            assert isinstance(evidence["latency_ms"], int)
+
+    @pytest.mark.parametrize("value", ["0", "false", "no", "", "maybe"])
+    def test_header_other_values_treated_as_off(self, client, value):
+        body = client.post(
+            "/v1/detect",
+            json={"text": "hello"},
+            headers={"X-Include-Latency": value},
+        ).json()
+        assert "latency_ms" not in body
+        for evidence in body["detectors"].values():
+            assert "latency_ms" not in evidence
+
+
 class TestBoundaries:
     """No FastAPI/pydantic in domain or orchestrator layers."""
 

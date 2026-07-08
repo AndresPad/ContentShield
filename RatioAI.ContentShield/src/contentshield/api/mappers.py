@@ -12,6 +12,7 @@ from contentshield.api.models import (
     DetectorEvidence,
     DetectRequest,
     DetectResponse,
+    LatencyEnvelope,
 )
 from contentshield.domain.models import (
     DetectionCommand,
@@ -38,8 +39,18 @@ def request_to_command(request: DetectRequest) -> DetectionCommand:
     )
 
 
-def response_to_model(response: DetectionResponse) -> DetectResponse:
-    """Map a domain response to the compact HTTP response contract."""
+def response_to_model(
+    response: DetectionResponse,
+    *,
+    include_latency: bool = False,
+) -> DetectResponse:
+    """Map a domain response to the compact HTTP response contract.
+
+    When *include_latency* is false (default) the resulting model serializes
+    byte-identically to v1.0.1: no per-detector ``latency_ms`` field and no
+    top-level ``latency_ms`` envelope. Callers opt in via the
+    ``X-Include-Latency`` request header.
+    """
     completed_results = [
         r for r in response.detectors.values()
         if r.status == DetectorStatus.COMPLETED
@@ -59,9 +70,14 @@ def response_to_model(response: DetectionResponse) -> DetectResponse:
         ),
         attack_types=attack_types,
         detectors={
-            name: _result_to_evidence(r)
+            name: _result_to_evidence(r, include_latency=include_latency)
             for name, r in response.detectors.items()
         },
+        latency_ms=(
+            LatencyEnvelope(end_to_end=response.latency_ms.end_to_end)
+            if include_latency
+            else None
+        ),
     )
 
 
@@ -71,7 +87,7 @@ def _top_score(results: Iterable[DetectorResult]) -> float:
     return max(scores, default=0.0)
 
 
-def _result_to_evidence(r: DetectorResult) -> DetectorEvidence:
+def _result_to_evidence(r: DetectorResult, *, include_latency: bool = False) -> DetectorEvidence:
     """Map a single domain detector result to its evidence model."""
     return DetectorEvidence(
         label=r.label,
@@ -79,4 +95,5 @@ def _result_to_evidence(r: DetectorResult) -> DetectorEvidence:
         status=r.status.value,
         attack_type=r.attack_type,
         reason=r.reason if r.status == DetectorStatus.COMPLETED else None,
+        latency_ms=r.latency_ms if include_latency else None,
     )

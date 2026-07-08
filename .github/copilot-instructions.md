@@ -49,10 +49,11 @@ infrastructure/                     # adapters (one file per detector)
 ## Stage2 service rules
 
 - The Stage2 wrapper ([../RatioAI.ContentShield/services/stage2/src/stage2/main.py](../RatioAI.ContentShield/services/stage2/src/stage2/main.py)) talks to vLLM over the OpenAI-compatible API at `VLLM_URL` (default `http://localhost:8000`, same container).
-- `/classify` returns a **binary label** via vLLM guided-choice decoding and an intentionally blank `reason` field. Only when `ENABLE_STAGE2_REASON=true` does a `YES` label trigger a second short SLM call (capped by `MAX_REASON_TOKENS`, default 64) to populate `reason`. `NO` returns immediately with empty reason. Preserve this gating — it controls cost and latency.
+- `/classify` returns a **binary label** via vLLM guided-choice decoding, a continuous score, and a short public `reason` for detected injections. `ENABLE_STAGE2_REASON` defaults to `true`; when enabled, a `YES` label triggers a second short SLM call capped by `MAX_REASON_TOKENS` (default 256) to populate `reason`. `NO` returns immediately with empty reason. Set `ENABLE_STAGE2_REASON=false` only when intentionally optimizing for latency/cost.
 - Prompts are loaded at startup from `PROMPT_PATH` / `REASON_PROMPT_PATH`, with `CLASSIFIER_PROMPT_TEXT` / `REASON_PROMPT_TEXT` as inline overrides. **Prefer the inline-text env vars for prompt experiments** so a feature container can ship a new prompt without rebuilding the Stage2 image.
 - The active V1 path is **label-only guided decoding**. Do not enable the Gemma reasoning parser or `ENABLE_THINKING=true` for V1 without explicit ask — they break the contract.
 - `MAX_MODEL_LEN=20000` is the validated single-A100 context window; `GPU_MEMORY_UTILIZATION=0.9` and `EXTRA_ENGINE_ARGS=--enable-prefix-caching` are the validated defaults. Don't change these without a test pass.
+- vLLM guided-choice responses may omit one of the constrained labels from generated-token `top_logprobs` even when the model chooses the other label. For normalized YES/NO probabilities, use a prompt-logprob fallback that scores both candidate answer prompts and softmaxes the two logprobs.
 
 ## Config and secrets
 

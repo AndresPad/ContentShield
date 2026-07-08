@@ -5,7 +5,7 @@ ContentShield is a prompt-injection detection service for enterprise AI systems.
 The current production-shaped design is a two-image deployment:
 
 - **Orchestrator app**: `src/contentshield/`, a CPU FastAPI service that owns the public `/v1/detect` API, detector policy, Azure Content Safety integration, Stage1 embedding classifier, and Stage2 HTTP client.
-- **Stage2 service**: `services/stage2/`, a GPU FastAPI wrapper around local vLLM serving `google/gemma-4-31b-it` with a `/classify` contract that returns a binary label and an intentionally blank public reason.
+- **Stage2 service**: `services/stage2/`, a GPU FastAPI wrapper around local vLLM serving `google/gemma-4-31b-it` with a `/classify` contract that returns a binary label, continuous score, and short public reason for detected injections.
 
 See [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md) for the current architecture and deployment contract.
 
@@ -51,7 +51,7 @@ Important behavior:
 - `mode=standard` runs the V1 release path with ACS and Stage2 in parallel.
 - `mode=fast` is intentionally not available in V1 and returns `400`.
 - `mode=deep` is intentionally not implemented and returns `400`.
-- Completed detector results expose `detectors.<name>.reason` as an extensible evidence field. V1 uses ACS normalized evidence; Stage2 returns the field as an intentionally blank string for this release. The Stage1/logistic-regression detector also supports this contract but is not wired into the first release.
+- Completed detector results expose `detectors.<name>.reason` as an extensible evidence field. V1 uses ACS normalized evidence; Stage2 populates the field for `YES` classifications and returns an empty reason for `NO`. The Stage1/logistic-regression detector also supports this contract but is not wired into the first release.
 - Diagnostic override requests such as `"detectors": ["stage2"]` run only the named detectors. In override mode the verdict uses OR semantics over completed requested detectors so single-detector evals remain meaningful. Requesting an unwired detector (e.g. `["stage1"]` under V1) returns it as `failed` and triggers the fail-closed verdict.
 - The `enable_query_detection` request option is a no-op in V1 (retained for schema stability).
 - Missing detector config produces `skipped` detector results rather than a boot failure.
@@ -114,10 +114,16 @@ Secrets must not be committed. In Azure, put `HF_TOKEN` in a Container Apps secr
 | `LANGUAGE_MODEL_ONLY` | Stage2 service | No | Set `true` for Gemma 4 language-only serving. |
 | `ENABLE_THINKING` | Stage2 service | No | Deprecated for the active V1 path. Set `false` or omit; Stage2 uses label-only guided choice decoding. |
 | `EXTRA_ENGINE_ARGS` | Stage2 service | No | Use `--enable-prefix-caching`. Do not enable the Gemma reasoning parser for the active V1 path. |
-| `ENABLE_STAGE2_REASON` | Stage2 service | No | Defaults to `false`. When `true`, Stage2 makes a second short SLM call only after a `YES` label to populate a one-sentence public `reason` field. `NO` returns immediately with an empty reason. |
-| `MAX_REASON_TOKENS` | Stage2 service | No | Defaults to `64`. Caps the Stage2 reason generation call. |
+| `ENABLE_STAGE2_REASON` | Stage2 service | No | Defaults to `true`. When enabled, Stage2 makes a second short SLM call only after a `YES` label to populate a public `reason` field. Set `false` to disable reason generation. `NO` returns immediately with an empty reason. |
+| `MAX_REASON_TOKENS` | Stage2 service | No | Defaults to `256`. Caps the Stage2 reason generation call. |
 | `REASON_PROMPT_PATH` | Stage2 service | No | Defaults to `/workspace/prompts/pi-reason-v1.txt`. Prompt used only for gated `YES` reason generation. |
 | `HF_HOME` | Stage2 service | No | Use a mounted/cacheable path when available. |
+| `STAGE2_PREFER_BAKED_MODEL` | Stage2 service | No | Defaults to `true`. For baked-local images, if `MODEL_NAME` is overridden with a Hugging Face repo id but `BAKED_MODEL_PATH/config.json` exists, the entrypoint uses the baked local weights instead — keeps the container serving offline despite a bad `MODEL_NAME` override. |
+| `BAKED_MODEL_PATH` | Stage2 service | No | Defaults to `/opt/models/gemma-4-31b-it`. Local path of the baked-local weights used by the `STAGE2_PREFER_BAKED_MODEL` self-heal. |
+| `STAGE2_PREFLIGHT_MODEL_CHECK` | Stage2 service | No | Defaults to `true`. Before launching vLLM, verifies the model resolves (local dir or cached snapshot). Under `HF_HUB_OFFLINE=true` it fails fast with an actionable message instead of a downstream `APIConnectionError`. |
+| `VLLM_REQUIRE_READY_BEFORE_WRAPPER` | Stage2 service | No | Defaults to `true`. The entrypoint waits for vLLM `/health` before starting the wrapper, so a model-load failure surfaces as a startup crash rather than failing `/classify` calls. |
+| `VLLM_STARTUP_TIMEOUT_S` | Stage2 service | No | Defaults to `900`. Max seconds to wait for vLLM readiness before the entrypoint exits non-zero. |
+| `VLLM_STARTUP_POLL_S` | Stage2 service | No | Defaults to `2`. Poll interval while waiting for vLLM readiness. |
 | `VLLM_URL` | Stage2 service | No | Where the Stage2 wrapper reaches vLLM. Defaults to `http://localhost:8000` (vLLM running in the same container). |
 | `VLLM_TIMEOUT_S` | Stage2 service | No | Per-call timeout when the wrapper invokes vLLM. Defaults to `30`. |
 | `CLASSIFIER_PROMPT_TEXT` | Stage2 service | No | Inline classifier prompt override. Prefer this for prompt experiments because it decouples prompt changes from model/image rebuilds. |

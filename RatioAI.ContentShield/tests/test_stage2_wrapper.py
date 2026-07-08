@@ -52,7 +52,16 @@ def test_invalid_max_reason_tokens_is_ignored_when_reason_disabled(
     )
 
     assert module.ENABLE_STAGE2_REASON is False
-    assert module.MAX_REASON_TOKENS == 64
+    assert module.MAX_REASON_TOKENS == 256
+
+
+def test_stage2_reason_defaults_enabled_with_256_token_budget(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module = _load_stage2_main(monkeypatch)
+
+    assert module.ENABLE_STAGE2_REASON is True
+    assert module.MAX_REASON_TOKENS == 256
 
 
 def test_vllm_health_url_defaults_to_vllm_url_health(

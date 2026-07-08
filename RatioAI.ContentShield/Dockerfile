@@ -1,5 +1,12 @@
 FROM mcr.microsoft.com/mirror/docker/library/python:3.11-slim
 
+LABEL org.opencontainers.image.title="contentshield" \
+      org.opencontainers.image.version="1.0.2-latency" \
+      org.opencontainers.image.description="ContentShield orchestrator with opt-in latency metrics via X-Include-Latency header" \
+      com.ratioai.build.variant="latency-enabled" \
+      com.ratioai.feature.latency_header="X-Include-Latency" \
+      com.ratioai.contract.compat="contentshield:1.0.1"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
