@@ -28,18 +28,39 @@ if [ -n "${HF_HOME:-}" ]; then
   mkdir -p "$HF_HOME"
 fi
 
-# Self-heal MODEL_NAME for baked-local images. The baked-local image ships the
-# weights on local disk at BAKED_MODEL_PATH and runs with HF_HUB_OFFLINE=true.
-# If the deployment overrides MODEL_NAME with a Hugging Face repo id (e.g.
-# "google/gemma-4-31b-it") instead of the baked local path, vLLM would attempt an
-# online snapshot_download that fails closed under offline mode. When the
-# provided MODEL_NAME is not a local directory but the baked weights are present,
-# fall back to them so the container serves regardless of the injected value.
-if [ "$STAGE2_PREFER_BAKED_MODEL" = "true" ] \
-  && [ ! -d "$MODEL_NAME" ] \
-  && [ -f "$BAKED_MODEL_PATH/config.json" ]; then
-  echo "MODEL_NAME='$MODEL_NAME' is not a local directory; using baked weights at '$BAKED_MODEL_PATH'"
-  MODEL_NAME="$BAKED_MODEL_PATH"
+# Resolve MODEL_NAME with model-agnostic precedence. The baked model is used by
+# default, but only when it IS the model we actually want; a different requested
+# model is served from the mounted HF cache, or downloaded if not cached:
+#   1. Local directory path                          -> use as-is
+#   2. Baked weights matching the requested model     -> use baked (default, offline)
+#   3. Requested repo id present in the HF cache      -> use cached copy (offline)
+#   4. Otherwise                                      -> leave as-is (online download)
+#
+# "Matching" compares the requested repo id's name (basename of "org/name")
+# against the baked directory name, case-insensitively. This keeps baked-local
+# images fast by default (and preserves the original self-heal, where MODEL_NAME
+# is the baked model's own repo id) while never clobbering a different model the
+# operator explicitly asks for.
+if [ ! -d "$MODEL_NAME" ]; then
+  _requested_name="$(printf '%s' "$MODEL_NAME" | sed 's#.*/##' | tr '[:upper:]' '[:lower:]')"
+  _baked_name="$(printf '%s' "$BAKED_MODEL_PATH" | sed 's#.*/##' | tr '[:upper:]' '[:lower:]')"
+
+  if [ "$STAGE2_PREFER_BAKED_MODEL" = "true" ] \
+    && [ -f "$BAKED_MODEL_PATH/config.json" ] \
+    && [ "$_requested_name" = "$_baked_name" ]; then
+    echo "MODEL_NAME='$MODEL_NAME' matches baked model; using baked weights at '$BAKED_MODEL_PATH'"
+    MODEL_NAME="$BAKED_MODEL_PATH"
+  else
+    _hf_cache_dir="${HUGGINGFACE_HUB_CACHE:-${HF_HOME:+$HF_HOME/hub}}"
+    # Transform repo id "org/name" -> cache dir "models--org--name"
+    _cache_entry="models--$(printf '%s' "$MODEL_NAME" | sed 's|/|--|g')"
+    if [ -n "$_hf_cache_dir" ] \
+      && [ -n "$(find "$_hf_cache_dir/$_cache_entry/snapshots" -name config.json 2>/dev/null | head -n 1)" ]; then
+      echo "MODEL_NAME='$MODEL_NAME' resolved from HF cache at '$_hf_cache_dir'"
+    else
+      echo "MODEL_NAME='$MODEL_NAME' not baked or cached; will attempt download"
+    fi
+  fi
 fi
 
 if [ "$STAGE2_PREFLIGHT_MODEL_CHECK" = "true" ] && [ ! -d "$MODEL_NAME" ]; then

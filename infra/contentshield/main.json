@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.43.8.12551",
-      "templateHash": "10696854050422101471"
+      "templateHash": "1426392472960775938"
     }
   },
   "parameters": {
@@ -114,7 +114,21 @@
       "type": "string",
       "defaultValue": "ca-contentshield-stage2",
       "metadata": {
-        "description": "Stage-2 GPU Container App name."
+        "description": "Stage-2 GPU Container App name (legacy single-app / variant-matrix path)."
+      }
+    },
+    "slmGpuAppName": {
+      "type": "string",
+      "defaultValue": "ca-cs-stage2-slm",
+      "metadata": {
+        "description": "SLM-GPU Stage-2 Container App name (mode-driven path). GPU vLLM (Gemma) variant."
+      }
+    },
+    "aoaiCpuAppName": {
+      "type": "string",
+      "defaultValue": "ca-cs-stage2-aoai",
+      "metadata": {
+        "description": "AOAI-CPU Stage-2 Container App name (mode-driven path). Azure OpenAI gpt-4o variant, no GPU."
       }
     },
     "apimName": {
@@ -219,7 +233,73 @@
       "type": "string",
       "defaultValue": "",
       "metadata": {
-        "description": "Tag for ca-contentshield-stage2 in the customer ACR. When non-empty, builds the full image reference as \"<acrLoginServer>/contentshield-stage2:<tag>\" and overrides stage2Image. Leave empty to use stage2Image as-is (placeholder/dev)."
+        "description": "Tag for ca-contentshield-stage2 in the customer ACR. When non-empty, builds the full image reference as \"<acrLoginServer>/contentshield-stage2:<tag>\" and overrides stage2Image. Leave empty to use stage2Image as-is (placeholder/dev). Legacy single-app / variant-matrix path only."
+      }
+    },
+    "stage2Mode": {
+      "type": "string",
+      "defaultValue": "both",
+      "allowedValues": [
+        "slm-gpu",
+        "aoai-cpu",
+        "both",
+        "none"
+      ],
+      "metadata": {
+        "description": "Which Stage-2 backend(s) to deploy. slm-gpu = GPU vLLM (Gemma) — needs A100 GPU quota. aoai-cpu = CPU wrapper over an Azure OpenAI gpt-4o deployment — no GPU. both = deploy both side-by-side (our demo RG). none = skip Stage-2. ICM teams pick slm-gpu OR aoai-cpu."
+      }
+    },
+    "orchestratorStage2Target": {
+      "type": "string",
+      "defaultValue": "aoai-cpu",
+      "allowedValues": [
+        "slm-gpu",
+        "aoai-cpu"
+      ],
+      "metadata": {
+        "description": "Which Stage-2 the orchestrator (ca-ratio-contentshield) routes to via SLM_ENDPOINT when more than one is deployed. slm-gpu | aoai-cpu. Flip this (revision-only change) to demo the other path end-to-end."
+      }
+    },
+    "slmGpuStage2ImageTag": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "SLM-GPU Stage-2 image tag in the customer ACR (contentshield-stage2 repo). Built from services/stage2/Dockerfile.slm-gpu."
+      }
+    },
+    "aoaiCpuStage2ImageTag": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "AOAI-CPU Stage-2 image tag in the customer ACR (contentshield-stage2 repo). Built from services/stage2/Dockerfile.aoai-cpu."
+      }
+    },
+    "azureOpenAiEndpoint": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Azure OpenAI / AIServices endpoint the aoai-cpu Stage-2 calls, e.g. https://myfoundry.cognitiveservices.azure.com/. REQUIRED when stage2Mode includes aoai-cpu."
+      }
+    },
+    "azureOpenAiDeployment": {
+      "type": "string",
+      "defaultValue": "gpt-4o",
+      "metadata": {
+        "description": "Azure OpenAI deployment (model) name for the aoai-cpu Stage-2."
+      }
+    },
+    "azureOpenAiApiVersion": {
+      "type": "string",
+      "defaultValue": "2024-10-21",
+      "metadata": {
+        "description": "Azure OpenAI API version for the aoai-cpu Stage-2."
+      }
+    },
+    "azureOpenAiApiKey": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional Azure OpenAI API key for the aoai-cpu Stage-2. Leave empty to use the app managed identity (Cognitive Services OpenAI User must then be granted on the target account — done by deploy.ps1 via -AzureOpenAiResourceId for cross-RG targets)."
       }
     },
     "appTargetPort": {
@@ -255,6 +335,13 @@
       "defaultValue": true,
       "metadata": {
         "description": "Deploy the stage-2 GPU container app. Set false to skip (e.g., during initial testing if GPU quota unavailable)."
+      }
+    },
+    "stage2Variants": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Variant matrix for Stage-2. When this array is non-empty, the legacy single Stage-2 app in modules/containerApps.bicep is skipped and one Microsoft.App/containerApps resource is created per entry via modules/stage2App.bicep. Each entry shape: { name, repo, friendlyTag (or digest), mountNfs, minReplicas, maxReplicas, hfToken (string, optional), extraEnv (array, optional) }. The image reference is built as <acrLoginServer>/<repo>:<friendlyTag>. Pin by digest by importing under a friendly tag (see scripts/sync-images-from-vendor.ps1 -DigestMap) and then reference that friendlyTag here."
       }
     },
     "extraStage2AllowedIps": {
@@ -387,6 +474,15 @@
         "description": "Client (Application) ID of the Entra app registration RatioAIDev. Exposed to container apps as RATIO_AI_DEV_CLIENT_ID."
       }
     }
+  },
+  "variables": {
+    "useStage2Variants": "[not(empty(parameters('stage2Variants')))]",
+    "effectiveStage2Mode": "[if(parameters('deployStage2'), parameters('stage2Mode'), 'none')]",
+    "modeWantsSlmGpu": "[or(equals(variables('effectiveStage2Mode'), 'slm-gpu'), equals(variables('effectiveStage2Mode'), 'both'))]",
+    "modeWantsAoaiCpu": "[or(equals(variables('effectiveStage2Mode'), 'aoai-cpu'), equals(variables('effectiveStage2Mode'), 'both'))]",
+    "deploySlmGpuApp": "[and(variables('modeWantsSlmGpu'), not(variables('useStage2Variants')))]",
+    "deployAoaiCpuApp": "[and(variables('modeWantsAoaiCpu'), not(variables('useStage2Variants')))]",
+    "orchTargetAppName": "[if(variables('useStage2Variants'), if(empty(parameters('stage2Variants')), parameters('stage2AppName'), parameters('stage2Variants')[0].name), if(and(equals(parameters('orchestratorStage2Target'), 'slm-gpu'), variables('deploySlmGpuApp')), parameters('slmGpuAppName'), if(and(equals(parameters('orchestratorStage2Target'), 'aoai-cpu'), variables('deployAoaiCpuApp')), parameters('aoaiCpuAppName'), if(variables('deployAoaiCpuApp'), parameters('aoaiCpuAppName'), if(variables('deploySlmGpuApp'), parameters('slmGpuAppName'), parameters('stage2AppName'))))))]"
   },
   "resources": [
     {
@@ -1645,12 +1741,12 @@
             "value": "[parameters('contentshieldV1MlDisabled')]"
           },
           "deployStage2": {
-            "value": "[parameters('deployStage2')]"
+            "value": false
           },
           "stage2AppName": {
-            "value": "[parameters('stage2AppName')]"
+            "value": "[variables('orchTargetAppName')]"
           },
-          "stage2Image": "[if(empty(parameters('stage2ImageTag')), createObject('value', parameters('stage2Image')), createObject('value', format('{0}/contentshield-stage2:{1}', reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.loginServer.value, parameters('stage2ImageTag'))))]",
+          "stage2Image": "[if(empty(parameters('slmGpuStage2ImageTag')), if(empty(parameters('stage2ImageTag')), createObject('value', parameters('stage2Image')), createObject('value', format('{0}/contentshield-stage2:{1}', reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.loginServer.value, parameters('stage2ImageTag')))), createObject('value', format('{0}/contentshield-stage2:{1}', reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.loginServer.value, parameters('slmGpuStage2ImageTag'))))]",
           "stage2TargetPort": {
             "value": "[parameters('stage2TargetPort')]"
           },
@@ -2128,7 +2224,1232 @@
       ]
     },
     {
-      "condition": "[and(and(parameters('deployHfPrewarmJob'), parameters('deployStorage')), parameters('deployStage2'))]",
+      "copy": {
+        "name": "stage2Apps",
+        "count": "[length(parameters('stage2Variants'))]"
+      },
+      "condition": "[and(parameters('deployStage2'), variables('useStage2Variants'))]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('mod-stage2-{0}', copyIndex())]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "caeName": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-cae'), '2025-04-01').outputs.name.value]"
+          },
+          "acrLoginServer": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.loginServer.value]"
+          },
+          "appInsightsConnectionString": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-monitoring'), '2025-04-01').outputs.appInsightsConnectionString.value]"
+          },
+          "natGatewayPublicIp": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-network'), '2025-04-01').outputs.natGatewayPublicIp.value]"
+          },
+          "caeStaticIp": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-cae'), '2025-04-01').outputs.staticIp.value]"
+          },
+          "extraAllowedIps": {
+            "value": "[parameters('extraStage2AllowedIps')]"
+          },
+          "name": {
+            "value": "[parameters('stage2Variants')[copyIndex()].name]"
+          },
+          "image": {
+            "value": "[format('{0}/{1}:{2}', reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.loginServer.value, parameters('stage2Variants')[copyIndex()].repo, parameters('stage2Variants')[copyIndex()].friendlyTag)]"
+          },
+          "gpuWorkloadProfileName": {
+            "value": "[parameters('gpuWorkloadProfileName')]"
+          },
+          "targetPort": "[if(contains(parameters('stage2Variants')[copyIndex()], 'targetPort'), createObject('value', parameters('stage2Variants')[copyIndex()].targetPort), createObject('value', parameters('stage2TargetPort')))]",
+          "mountNfs": "[if(contains(parameters('stage2Variants')[copyIndex()], 'mountNfs'), createObject('value', parameters('stage2Variants')[copyIndex()].mountNfs), createObject('value', false()))]",
+          "storageAccountName": "[if(parameters('deployStorage'), createObject('value', reference(resourceId('Microsoft.Resources/deployments', 'mod-storage'), '2025-04-01').outputs.name.value), createObject('value', ''))]",
+          "hfCacheShareName": {
+            "value": "[parameters('hfCacheShareName')]"
+          },
+          "minReplicas": "[if(contains(parameters('stage2Variants')[copyIndex()], 'minReplicas'), createObject('value', parameters('stage2Variants')[copyIndex()].minReplicas), createObject('value', 0))]",
+          "maxReplicas": "[if(contains(parameters('stage2Variants')[copyIndex()], 'maxReplicas'), createObject('value', parameters('stage2Variants')[copyIndex()].maxReplicas), createObject('value', 1))]",
+          "hfToken": "[if(contains(parameters('stage2Variants')[copyIndex()], 'hfToken'), createObject('value', parameters('stage2Variants')[copyIndex()].hfToken), createObject('value', ''))]",
+          "extraEnv": "[if(contains(parameters('stage2Variants')[copyIndex()], 'extraEnv'), createObject('value', parameters('stage2Variants')[copyIndex()].extraEnv), createObject('value', createArray()))]",
+          "scalerConcurrentRequests": "[if(contains(parameters('stage2Variants')[copyIndex()], 'scalerConcurrentRequests'), createObject('value', parameters('stage2Variants')[copyIndex()].scalerConcurrentRequests), createObject('value', '30'))]",
+          "scalerCooldownSec": "[if(contains(parameters('stage2Variants')[copyIndex()], 'scalerCooldownSec'), createObject('value', parameters('stage2Variants')[copyIndex()].scalerCooldownSec), createObject('value', 600))]"
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "11201599309454273930"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "object"
+            },
+            "caeName": {
+              "type": "string"
+            },
+            "acrLoginServer": {
+              "type": "string"
+            },
+            "appInsightsConnectionString": {
+              "type": "string"
+            },
+            "natGatewayPublicIp": {
+              "type": "string"
+            },
+            "caeStaticIp": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Static IP of the CAE — added to ingress allowlist so the orchestrator can reach this variant via internal ingress."
+              }
+            },
+            "extraAllowedIps": {
+              "type": "array",
+              "defaultValue": [],
+              "metadata": {
+                "description": "Optional extra IP CIDR ranges to allow on this variant ingress."
+              }
+            },
+            "name": {
+              "type": "string",
+              "metadata": {
+                "description": "Container App name (e.g., ca-contentshield-stage2-baked-local)."
+              }
+            },
+            "image": {
+              "type": "string",
+              "metadata": {
+                "description": "Full image reference: <acrLoginServer>/contentshield-stage2@sha256:... or :<tag>."
+              }
+            },
+            "gpuWorkloadProfileName": {
+              "type": "string",
+              "metadata": {
+                "description": "GPU workload profile to schedule on (e.g., NC24-A100)."
+              }
+            },
+            "targetPort": {
+              "type": "int",
+              "defaultValue": 8080
+            },
+            "mountNfs": {
+              "type": "bool",
+              "defaultValue": false,
+              "metadata": {
+                "description": "Mount the CAE-registered hfcache NFS share into this variant. Only set true for the cache-disabled variant (or when explicitly testing NFS-warm scenarios). Baked variants must NOT mount the share — they would shadow the in-image weights or break offline mode."
+              }
+            },
+            "storageAccountName": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Storage account name (used to compute /mount/<sa>/<share>)."
+              }
+            },
+            "hfCacheShareName": {
+              "type": "string",
+              "defaultValue": "hfcache",
+              "metadata": {
+                "description": "NFS share name (CAE storage definition name)."
+              }
+            },
+            "minReplicas": {
+              "type": "int",
+              "defaultValue": 0,
+              "minValue": 0,
+              "maxValue": 5,
+              "metadata": {
+                "description": "Minimum replicas. Default 0 so the variant idles at zero cost between test runs; the test harness scales it to 1 to measure cold start."
+              }
+            },
+            "maxReplicas": {
+              "type": "int",
+              "defaultValue": 1,
+              "minValue": 1,
+              "maxValue": 10,
+              "metadata": {
+                "description": "Maximum replicas."
+              }
+            },
+            "maxModelLen": {
+              "type": "string",
+              "defaultValue": "20000",
+              "metadata": {
+                "description": "Tuneable: vLLM --max-model-len. 20000 is the validated single-A100 ceiling for gemma-4-31b-it."
+              }
+            },
+            "gpuMemoryUtilization": {
+              "type": "string",
+              "defaultValue": "0.9",
+              "metadata": {
+                "description": "Tuneable: vLLM --gpu-memory-utilization. 0.9 is the validated single-A100 setting."
+              }
+            },
+            "extraEngineArgs": {
+              "type": "string",
+              "defaultValue": "--enable-prefix-caching",
+              "metadata": {
+                "description": "Tuneable: extra engine args, e.g. \"--enable-prefix-caching\"."
+              }
+            },
+            "languageModelOnly": {
+              "type": "string",
+              "defaultValue": "true",
+              "metadata": {
+                "description": "start-vllm.sh flag → vLLM --language-model-only."
+              }
+            },
+            "enableThinking": {
+              "type": "string",
+              "defaultValue": "false",
+              "metadata": {
+                "description": "start-vllm.sh flag → controls Gemma reasoning template. Keep false for label-only guided-choice path."
+              }
+            },
+            "cacheEnabled": {
+              "type": "string",
+              "defaultValue": "true",
+              "metadata": {
+                "description": "Wrapper-side reason-cache toggle."
+              }
+            },
+            "hfToken": {
+              "type": "securestring",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Optional Hugging Face token. Only inject for variants that need to download (cache-disabled)."
+              }
+            },
+            "scalerConcurrentRequests": {
+              "type": "string",
+              "defaultValue": "30",
+              "metadata": {
+                "description": "vLLM batches internally so per-replica concurrency can be high. Use 30 in-flight requests as the trigger to add a second replica — well above one replica's comfortable throughput but below the point where p95 latency degrades."
+              }
+            },
+            "scalerCooldownSec": {
+              "type": "int",
+              "defaultValue": 600,
+              "metadata": {
+                "description": "ACA scaler cooldown (seconds) — how long a scaled-up replica stays before scale-down is allowed. 600s = 10 min keeps GPU node warm between bursts."
+              }
+            },
+            "extraEnv": {
+              "type": "array",
+              "defaultValue": [],
+              "metadata": {
+                "description": "Free-form additional env to merge after the tuneables. Use for per-variant overrides only; do NOT set MODEL_NAME or HF_HOME here unless you have a specific reason — see file header."
+              }
+            }
+          },
+          "variables": {
+            "copy": [
+              {
+                "name": "extraIpRules",
+                "count": "[length(parameters('extraAllowedIps'))]",
+                "input": {
+                  "name": "[format('AllowExtra{0}', copyIndex('extraIpRules'))]",
+                  "action": "Allow",
+                  "ipAddressRange": "[parameters('extraAllowedIps')[copyIndex('extraIpRules')]]"
+                }
+              }
+            ],
+            "revisionSuffix": "[format('r{0}', take(uniqueString(parameters('image')), 8))]",
+            "nfsMountPath": "[if(empty(parameters('storageAccountName')), '/mnt/hfcache', format('/mount/{0}/{1}', parameters('storageAccountName'), parameters('hfCacheShareName')))]",
+            "tuneableEnv": [
+              {
+                "name": "MAX_MODEL_LEN",
+                "value": "[parameters('maxModelLen')]"
+              },
+              {
+                "name": "GPU_MEMORY_UTILIZATION",
+                "value": "[parameters('gpuMemoryUtilization')]"
+              },
+              {
+                "name": "LANGUAGE_MODEL_ONLY",
+                "value": "[parameters('languageModelOnly')]"
+              },
+              {
+                "name": "EXTRA_ENGINE_ARGS",
+                "value": "[parameters('extraEngineArgs')]"
+              },
+              {
+                "name": "ENABLE_THINKING",
+                "value": "[parameters('enableThinking')]"
+              },
+              {
+                "name": "CACHE_ENABLED",
+                "value": "[parameters('cacheEnabled')]"
+              },
+              {
+                "name": "APPLICATIONINSIGHTS_CONNECTION_STRING",
+                "value": "[parameters('appInsightsConnectionString')]"
+              }
+            ],
+            "hfTokenEnv": "[if(empty(parameters('hfToken')), createArray(), createArray(createObject('name', 'HF_TOKEN', 'secretRef', 'hf-token')))]",
+            "fullEnv": "[concat(variables('hfTokenEnv'), variables('tuneableEnv'), parameters('extraEnv'))]",
+            "secrets": "[if(empty(parameters('hfToken')), createArray(), createArray(createObject('name', 'hf-token', 'value', parameters('hfToken'))))]",
+            "baseIpRules": [
+              {
+                "name": "AllowAPIMNatGateway",
+                "action": "Allow",
+                "ipAddressRange": "[format('{0}/32', parameters('natGatewayPublicIp'))]"
+              }
+            ],
+            "caeIpRule": "[if(empty(parameters('caeStaticIp')), createArray(), createArray(createObject('name', 'AllowACAEnvStatic', 'description', 'Allow same ACA environment static IP', 'action', 'Allow', 'ipAddressRange', format('{0}/32', parameters('caeStaticIp')))))]",
+            "ipRules": "[concat(variables('baseIpRules'), variables('caeIpRule'), variables('extraIpRules'))]",
+            "volumeMounts": "[if(parameters('mountNfs'), createArray(createObject('mountPath', variables('nfsMountPath'), 'volumeName', parameters('hfCacheShareName'))), createArray())]",
+            "volumes": "[if(parameters('mountNfs'), createArray(createObject('name', parameters('hfCacheShareName'), 'storageName', parameters('hfCacheShareName'), 'storageType', 'NfsAzureFile')), createArray())]"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.App/containerApps",
+              "apiVersion": "2024-10-02-preview",
+              "name": "[parameters('name')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {
+                "environmentId": "[resourceId('Microsoft.App/managedEnvironments', parameters('caeName'))]",
+                "workloadProfileName": "[parameters('gpuWorkloadProfileName')]",
+                "configuration": {
+                  "activeRevisionsMode": "Single",
+                  "ingress": {
+                    "external": false,
+                    "targetPort": "[parameters('targetPort')]",
+                    "transport": "Auto",
+                    "allowInsecure": false,
+                    "ipSecurityRestrictions": "[variables('ipRules')]",
+                    "traffic": [
+                      {
+                        "latestRevision": true,
+                        "weight": 100
+                      }
+                    ]
+                  },
+                  "registries": [
+                    {
+                      "server": "[parameters('acrLoginServer')]",
+                      "identity": "system-environment"
+                    }
+                  ],
+                  "secrets": "[variables('secrets')]",
+                  "maxInactiveRevisions": 100
+                },
+                "template": {
+                  "revisionSuffix": "[variables('revisionSuffix')]",
+                  "containers": [
+                    {
+                      "name": "[parameters('name')]",
+                      "image": "[parameters('image')]",
+                      "resources": {
+                        "cpu": "[json('24.0')]",
+                        "memory": "220Gi"
+                      },
+                      "env": "[variables('fullEnv')]",
+                      "probes": [
+                        {
+                          "type": "Liveness",
+                          "tcpSocket": {
+                            "port": "[parameters('targetPort')]"
+                          },
+                          "periodSeconds": 10,
+                          "timeoutSeconds": 5,
+                          "successThreshold": 1,
+                          "failureThreshold": 3
+                        },
+                        {
+                          "type": "Readiness",
+                          "tcpSocket": {
+                            "port": "[parameters('targetPort')]"
+                          },
+                          "periodSeconds": 5,
+                          "timeoutSeconds": 5,
+                          "successThreshold": 1,
+                          "failureThreshold": 48
+                        },
+                        {
+                          "type": "Startup",
+                          "tcpSocket": {
+                            "port": "[parameters('targetPort')]"
+                          },
+                          "initialDelaySeconds": 5,
+                          "periodSeconds": 5,
+                          "timeoutSeconds": 3,
+                          "successThreshold": 1,
+                          "failureThreshold": 180
+                        }
+                      ],
+                      "volumeMounts": "[variables('volumeMounts')]"
+                    }
+                  ],
+                  "scale": {
+                    "minReplicas": "[parameters('minReplicas')]",
+                    "maxReplicas": "[parameters('maxReplicas')]",
+                    "cooldownPeriod": "[parameters('scalerCooldownSec')]",
+                    "pollingInterval": 15,
+                    "rules": [
+                      {
+                        "name": "http-scaler",
+                        "http": {
+                          "metadata": {
+                            "concurrentRequests": "[parameters('scalerConcurrentRequests')]"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  "volumes": "[variables('volumes')]",
+                  "terminationGracePeriodSeconds": 60
+                }
+              }
+            }
+          ],
+          "outputs": {
+            "name": {
+              "type": "string",
+              "value": "[parameters('name')]"
+            },
+            "fqdn": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.App/containerApps', parameters('name')), '2024-10-02-preview').configuration.ingress.fqdn]"
+            },
+            "principalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.App/containerApps', parameters('name')), '2024-10-02-preview', 'full').identity.principalId]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'mod-acr')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-cae')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-monitoring')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-network')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-storage')]"
+      ]
+    },
+    {
+      "condition": "[variables('deploySlmGpuApp')]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "mod-stage2-slm",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "caeName": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-cae'), '2025-04-01').outputs.name.value]"
+          },
+          "acrLoginServer": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.loginServer.value]"
+          },
+          "appInsightsConnectionString": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-monitoring'), '2025-04-01').outputs.appInsightsConnectionString.value]"
+          },
+          "natGatewayPublicIp": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-network'), '2025-04-01').outputs.natGatewayPublicIp.value]"
+          },
+          "caeStaticIp": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-cae'), '2025-04-01').outputs.staticIp.value]"
+          },
+          "extraAllowedIps": {
+            "value": "[parameters('extraStage2AllowedIps')]"
+          },
+          "name": {
+            "value": "[parameters('slmGpuAppName')]"
+          },
+          "image": "[if(empty(parameters('slmGpuStage2ImageTag')), if(empty(parameters('stage2ImageTag')), createObject('value', parameters('stage2Image')), createObject('value', format('{0}/contentshield-stage2:{1}', reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.loginServer.value, parameters('stage2ImageTag')))), createObject('value', format('{0}/contentshield-stage2:{1}', reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.loginServer.value, parameters('slmGpuStage2ImageTag'))))]",
+          "gpuWorkloadProfileName": {
+            "value": "[parameters('gpuWorkloadProfileName')]"
+          },
+          "targetPort": {
+            "value": "[parameters('stage2TargetPort')]"
+          },
+          "mountNfs": {
+            "value": false
+          },
+          "storageAccountName": "[if(parameters('deployStorage'), createObject('value', reference(resourceId('Microsoft.Resources/deployments', 'mod-storage'), '2025-04-01').outputs.name.value), createObject('value', ''))]",
+          "hfCacheShareName": {
+            "value": "[parameters('hfCacheShareName')]"
+          },
+          "minReplicas": {
+            "value": 1
+          },
+          "maxReplicas": {
+            "value": 2
+          },
+          "hfToken": {
+            "value": "[parameters('hfToken')]"
+          },
+          "extraEnv": {
+            "value": []
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "11201599309454273930"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "object"
+            },
+            "caeName": {
+              "type": "string"
+            },
+            "acrLoginServer": {
+              "type": "string"
+            },
+            "appInsightsConnectionString": {
+              "type": "string"
+            },
+            "natGatewayPublicIp": {
+              "type": "string"
+            },
+            "caeStaticIp": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Static IP of the CAE — added to ingress allowlist so the orchestrator can reach this variant via internal ingress."
+              }
+            },
+            "extraAllowedIps": {
+              "type": "array",
+              "defaultValue": [],
+              "metadata": {
+                "description": "Optional extra IP CIDR ranges to allow on this variant ingress."
+              }
+            },
+            "name": {
+              "type": "string",
+              "metadata": {
+                "description": "Container App name (e.g., ca-contentshield-stage2-baked-local)."
+              }
+            },
+            "image": {
+              "type": "string",
+              "metadata": {
+                "description": "Full image reference: <acrLoginServer>/contentshield-stage2@sha256:... or :<tag>."
+              }
+            },
+            "gpuWorkloadProfileName": {
+              "type": "string",
+              "metadata": {
+                "description": "GPU workload profile to schedule on (e.g., NC24-A100)."
+              }
+            },
+            "targetPort": {
+              "type": "int",
+              "defaultValue": 8080
+            },
+            "mountNfs": {
+              "type": "bool",
+              "defaultValue": false,
+              "metadata": {
+                "description": "Mount the CAE-registered hfcache NFS share into this variant. Only set true for the cache-disabled variant (or when explicitly testing NFS-warm scenarios). Baked variants must NOT mount the share — they would shadow the in-image weights or break offline mode."
+              }
+            },
+            "storageAccountName": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Storage account name (used to compute /mount/<sa>/<share>)."
+              }
+            },
+            "hfCacheShareName": {
+              "type": "string",
+              "defaultValue": "hfcache",
+              "metadata": {
+                "description": "NFS share name (CAE storage definition name)."
+              }
+            },
+            "minReplicas": {
+              "type": "int",
+              "defaultValue": 0,
+              "minValue": 0,
+              "maxValue": 5,
+              "metadata": {
+                "description": "Minimum replicas. Default 0 so the variant idles at zero cost between test runs; the test harness scales it to 1 to measure cold start."
+              }
+            },
+            "maxReplicas": {
+              "type": "int",
+              "defaultValue": 1,
+              "minValue": 1,
+              "maxValue": 10,
+              "metadata": {
+                "description": "Maximum replicas."
+              }
+            },
+            "maxModelLen": {
+              "type": "string",
+              "defaultValue": "20000",
+              "metadata": {
+                "description": "Tuneable: vLLM --max-model-len. 20000 is the validated single-A100 ceiling for gemma-4-31b-it."
+              }
+            },
+            "gpuMemoryUtilization": {
+              "type": "string",
+              "defaultValue": "0.9",
+              "metadata": {
+                "description": "Tuneable: vLLM --gpu-memory-utilization. 0.9 is the validated single-A100 setting."
+              }
+            },
+            "extraEngineArgs": {
+              "type": "string",
+              "defaultValue": "--enable-prefix-caching",
+              "metadata": {
+                "description": "Tuneable: extra engine args, e.g. \"--enable-prefix-caching\"."
+              }
+            },
+            "languageModelOnly": {
+              "type": "string",
+              "defaultValue": "true",
+              "metadata": {
+                "description": "start-vllm.sh flag → vLLM --language-model-only."
+              }
+            },
+            "enableThinking": {
+              "type": "string",
+              "defaultValue": "false",
+              "metadata": {
+                "description": "start-vllm.sh flag → controls Gemma reasoning template. Keep false for label-only guided-choice path."
+              }
+            },
+            "cacheEnabled": {
+              "type": "string",
+              "defaultValue": "true",
+              "metadata": {
+                "description": "Wrapper-side reason-cache toggle."
+              }
+            },
+            "hfToken": {
+              "type": "securestring",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Optional Hugging Face token. Only inject for variants that need to download (cache-disabled)."
+              }
+            },
+            "scalerConcurrentRequests": {
+              "type": "string",
+              "defaultValue": "30",
+              "metadata": {
+                "description": "vLLM batches internally so per-replica concurrency can be high. Use 30 in-flight requests as the trigger to add a second replica — well above one replica's comfortable throughput but below the point where p95 latency degrades."
+              }
+            },
+            "scalerCooldownSec": {
+              "type": "int",
+              "defaultValue": 600,
+              "metadata": {
+                "description": "ACA scaler cooldown (seconds) — how long a scaled-up replica stays before scale-down is allowed. 600s = 10 min keeps GPU node warm between bursts."
+              }
+            },
+            "extraEnv": {
+              "type": "array",
+              "defaultValue": [],
+              "metadata": {
+                "description": "Free-form additional env to merge after the tuneables. Use for per-variant overrides only; do NOT set MODEL_NAME or HF_HOME here unless you have a specific reason — see file header."
+              }
+            }
+          },
+          "variables": {
+            "copy": [
+              {
+                "name": "extraIpRules",
+                "count": "[length(parameters('extraAllowedIps'))]",
+                "input": {
+                  "name": "[format('AllowExtra{0}', copyIndex('extraIpRules'))]",
+                  "action": "Allow",
+                  "ipAddressRange": "[parameters('extraAllowedIps')[copyIndex('extraIpRules')]]"
+                }
+              }
+            ],
+            "revisionSuffix": "[format('r{0}', take(uniqueString(parameters('image')), 8))]",
+            "nfsMountPath": "[if(empty(parameters('storageAccountName')), '/mnt/hfcache', format('/mount/{0}/{1}', parameters('storageAccountName'), parameters('hfCacheShareName')))]",
+            "tuneableEnv": [
+              {
+                "name": "MAX_MODEL_LEN",
+                "value": "[parameters('maxModelLen')]"
+              },
+              {
+                "name": "GPU_MEMORY_UTILIZATION",
+                "value": "[parameters('gpuMemoryUtilization')]"
+              },
+              {
+                "name": "LANGUAGE_MODEL_ONLY",
+                "value": "[parameters('languageModelOnly')]"
+              },
+              {
+                "name": "EXTRA_ENGINE_ARGS",
+                "value": "[parameters('extraEngineArgs')]"
+              },
+              {
+                "name": "ENABLE_THINKING",
+                "value": "[parameters('enableThinking')]"
+              },
+              {
+                "name": "CACHE_ENABLED",
+                "value": "[parameters('cacheEnabled')]"
+              },
+              {
+                "name": "APPLICATIONINSIGHTS_CONNECTION_STRING",
+                "value": "[parameters('appInsightsConnectionString')]"
+              }
+            ],
+            "hfTokenEnv": "[if(empty(parameters('hfToken')), createArray(), createArray(createObject('name', 'HF_TOKEN', 'secretRef', 'hf-token')))]",
+            "fullEnv": "[concat(variables('hfTokenEnv'), variables('tuneableEnv'), parameters('extraEnv'))]",
+            "secrets": "[if(empty(parameters('hfToken')), createArray(), createArray(createObject('name', 'hf-token', 'value', parameters('hfToken'))))]",
+            "baseIpRules": [
+              {
+                "name": "AllowAPIMNatGateway",
+                "action": "Allow",
+                "ipAddressRange": "[format('{0}/32', parameters('natGatewayPublicIp'))]"
+              }
+            ],
+            "caeIpRule": "[if(empty(parameters('caeStaticIp')), createArray(), createArray(createObject('name', 'AllowACAEnvStatic', 'description', 'Allow same ACA environment static IP', 'action', 'Allow', 'ipAddressRange', format('{0}/32', parameters('caeStaticIp')))))]",
+            "ipRules": "[concat(variables('baseIpRules'), variables('caeIpRule'), variables('extraIpRules'))]",
+            "volumeMounts": "[if(parameters('mountNfs'), createArray(createObject('mountPath', variables('nfsMountPath'), 'volumeName', parameters('hfCacheShareName'))), createArray())]",
+            "volumes": "[if(parameters('mountNfs'), createArray(createObject('name', parameters('hfCacheShareName'), 'storageName', parameters('hfCacheShareName'), 'storageType', 'NfsAzureFile')), createArray())]"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.App/containerApps",
+              "apiVersion": "2024-10-02-preview",
+              "name": "[parameters('name')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {
+                "environmentId": "[resourceId('Microsoft.App/managedEnvironments', parameters('caeName'))]",
+                "workloadProfileName": "[parameters('gpuWorkloadProfileName')]",
+                "configuration": {
+                  "activeRevisionsMode": "Single",
+                  "ingress": {
+                    "external": false,
+                    "targetPort": "[parameters('targetPort')]",
+                    "transport": "Auto",
+                    "allowInsecure": false,
+                    "ipSecurityRestrictions": "[variables('ipRules')]",
+                    "traffic": [
+                      {
+                        "latestRevision": true,
+                        "weight": 100
+                      }
+                    ]
+                  },
+                  "registries": [
+                    {
+                      "server": "[parameters('acrLoginServer')]",
+                      "identity": "system-environment"
+                    }
+                  ],
+                  "secrets": "[variables('secrets')]",
+                  "maxInactiveRevisions": 100
+                },
+                "template": {
+                  "revisionSuffix": "[variables('revisionSuffix')]",
+                  "containers": [
+                    {
+                      "name": "[parameters('name')]",
+                      "image": "[parameters('image')]",
+                      "resources": {
+                        "cpu": "[json('24.0')]",
+                        "memory": "220Gi"
+                      },
+                      "env": "[variables('fullEnv')]",
+                      "probes": [
+                        {
+                          "type": "Liveness",
+                          "tcpSocket": {
+                            "port": "[parameters('targetPort')]"
+                          },
+                          "periodSeconds": 10,
+                          "timeoutSeconds": 5,
+                          "successThreshold": 1,
+                          "failureThreshold": 3
+                        },
+                        {
+                          "type": "Readiness",
+                          "tcpSocket": {
+                            "port": "[parameters('targetPort')]"
+                          },
+                          "periodSeconds": 5,
+                          "timeoutSeconds": 5,
+                          "successThreshold": 1,
+                          "failureThreshold": 48
+                        },
+                        {
+                          "type": "Startup",
+                          "tcpSocket": {
+                            "port": "[parameters('targetPort')]"
+                          },
+                          "initialDelaySeconds": 5,
+                          "periodSeconds": 5,
+                          "timeoutSeconds": 3,
+                          "successThreshold": 1,
+                          "failureThreshold": 180
+                        }
+                      ],
+                      "volumeMounts": "[variables('volumeMounts')]"
+                    }
+                  ],
+                  "scale": {
+                    "minReplicas": "[parameters('minReplicas')]",
+                    "maxReplicas": "[parameters('maxReplicas')]",
+                    "cooldownPeriod": "[parameters('scalerCooldownSec')]",
+                    "pollingInterval": 15,
+                    "rules": [
+                      {
+                        "name": "http-scaler",
+                        "http": {
+                          "metadata": {
+                            "concurrentRequests": "[parameters('scalerConcurrentRequests')]"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  "volumes": "[variables('volumes')]",
+                  "terminationGracePeriodSeconds": 60
+                }
+              }
+            }
+          ],
+          "outputs": {
+            "name": {
+              "type": "string",
+              "value": "[parameters('name')]"
+            },
+            "fqdn": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.App/containerApps', parameters('name')), '2024-10-02-preview').configuration.ingress.fqdn]"
+            },
+            "principalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.App/containerApps', parameters('name')), '2024-10-02-preview', 'full').identity.principalId]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'mod-acr')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-apps')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-cae')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-monitoring')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-network')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-storage')]"
+      ]
+    },
+    {
+      "condition": "[variables('deployAoaiCpuApp')]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "mod-stage2-aoai",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "caeName": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-cae'), '2025-04-01').outputs.name.value]"
+          },
+          "acrLoginServer": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.loginServer.value]"
+          },
+          "appInsightsConnectionString": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-monitoring'), '2025-04-01').outputs.appInsightsConnectionString.value]"
+          },
+          "natGatewayPublicIp": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-network'), '2025-04-01').outputs.natGatewayPublicIp.value]"
+          },
+          "caeStaticIp": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-cae'), '2025-04-01').outputs.staticIp.value]"
+          },
+          "extraAllowedIps": {
+            "value": "[parameters('extraStage2AllowedIps')]"
+          },
+          "name": {
+            "value": "[parameters('aoaiCpuAppName')]"
+          },
+          "image": "[if(empty(parameters('aoaiCpuStage2ImageTag')), if(empty(parameters('stage2ImageTag')), createObject('value', parameters('stage2Image')), createObject('value', format('{0}/contentshield-stage2:{1}', reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.loginServer.value, parameters('stage2ImageTag')))), createObject('value', format('{0}/contentshield-stage2:{1}', reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.loginServer.value, parameters('aoaiCpuStage2ImageTag'))))]",
+          "targetPort": {
+            "value": "[parameters('stage2TargetPort')]"
+          },
+          "azureOpenAiEndpoint": {
+            "value": "[parameters('azureOpenAiEndpoint')]"
+          },
+          "azureOpenAiDeployment": {
+            "value": "[parameters('azureOpenAiDeployment')]"
+          },
+          "azureOpenAiApiVersion": {
+            "value": "[parameters('azureOpenAiApiVersion')]"
+          },
+          "azureOpenAiApiKey": {
+            "value": "[parameters('azureOpenAiApiKey')]"
+          },
+          "minReplicas": {
+            "value": 1
+          },
+          "maxReplicas": {
+            "value": 3
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "14717438999926477904"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "object"
+            },
+            "caeName": {
+              "type": "string"
+            },
+            "acrLoginServer": {
+              "type": "string"
+            },
+            "appInsightsConnectionString": {
+              "type": "string"
+            },
+            "natGatewayPublicIp": {
+              "type": "string"
+            },
+            "caeStaticIp": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Static IP of the CAE — added to ingress allowlist so the orchestrator can reach this app via internal ingress."
+              }
+            },
+            "extraAllowedIps": {
+              "type": "array",
+              "defaultValue": [],
+              "metadata": {
+                "description": "Optional extra IP CIDR ranges to allow on this app ingress."
+              }
+            },
+            "name": {
+              "type": "string",
+              "metadata": {
+                "description": "Container App name (e.g., ca-cs-stage2-aoai)."
+              }
+            },
+            "image": {
+              "type": "string",
+              "metadata": {
+                "description": "Full image reference: <acrLoginServer>/contentshield-stage2:<aoai-cpu-tag>."
+              }
+            },
+            "targetPort": {
+              "type": "int",
+              "defaultValue": 8080
+            },
+            "azureOpenAiEndpoint": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure OpenAI endpoint, e.g. https://myfoundry.cognitiveservices.azure.com/. Required."
+              }
+            },
+            "azureOpenAiDeployment": {
+              "type": "string",
+              "defaultValue": "gpt-4o",
+              "metadata": {
+                "description": "Azure OpenAI deployment (model) name, e.g. gpt-4o."
+              }
+            },
+            "azureOpenAiApiVersion": {
+              "type": "string",
+              "defaultValue": "2024-10-21",
+              "metadata": {
+                "description": "Azure OpenAI API version."
+              }
+            },
+            "azureOpenAiApiKey": {
+              "type": "securestring",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Optional Azure OpenAI API key. Leave empty to use this app managed identity (DefaultAzureCredential)."
+              }
+            },
+            "minReplicas": {
+              "type": "int",
+              "defaultValue": 1,
+              "minValue": 0,
+              "maxValue": 10,
+              "metadata": {
+                "description": "Minimum replicas. Default 1 keeps the wrapper warm (it is cheap CPU-only)."
+              }
+            },
+            "maxReplicas": {
+              "type": "int",
+              "defaultValue": 3,
+              "minValue": 1,
+              "maxValue": 10,
+              "metadata": {
+                "description": "Maximum replicas."
+              }
+            },
+            "cpuCores": {
+              "type": "string",
+              "defaultValue": "1.0",
+              "metadata": {
+                "description": "CPU cores for the wrapper (Consumption profile). The wrapper is a thin proxy to Azure OpenAI."
+              }
+            },
+            "memory": {
+              "type": "string",
+              "defaultValue": "2Gi",
+              "metadata": {
+                "description": "Memory for the wrapper."
+              }
+            },
+            "extraEnv": {
+              "type": "array",
+              "defaultValue": [],
+              "metadata": {
+                "description": "Free-form additional env merged after the AOAI env. Use for per-deploy overrides (e.g. AZURE_OPENAI_TIMEOUT_S)."
+              }
+            }
+          },
+          "variables": {
+            "copy": [
+              {
+                "name": "extraIpRules",
+                "count": "[length(parameters('extraAllowedIps'))]",
+                "input": {
+                  "name": "[format('AllowExtra{0}', copyIndex('extraIpRules'))]",
+                  "action": "Allow",
+                  "ipAddressRange": "[parameters('extraAllowedIps')[copyIndex('extraIpRules')]]"
+                }
+              }
+            ],
+            "revisionSuffix": "[format('r{0}', take(uniqueString(parameters('image')), 8))]",
+            "apiKeyEnv": "[if(empty(parameters('azureOpenAiApiKey')), createArray(), createArray(createObject('name', 'AZURE_OPENAI_API_KEY', 'secretRef', 'aoai-api-key')))]",
+            "aoaiEnv": [
+              {
+                "name": "STAGE2_BACKEND",
+                "value": "azure_openai"
+              },
+              {
+                "name": "AZURE_OPENAI_ENDPOINT",
+                "value": "[parameters('azureOpenAiEndpoint')]"
+              },
+              {
+                "name": "AZURE_OPENAI_DEPLOYMENT",
+                "value": "[parameters('azureOpenAiDeployment')]"
+              },
+              {
+                "name": "AZURE_OPENAI_API_VERSION",
+                "value": "[parameters('azureOpenAiApiVersion')]"
+              },
+              {
+                "name": "APPLICATIONINSIGHTS_CONNECTION_STRING",
+                "value": "[parameters('appInsightsConnectionString')]"
+              }
+            ],
+            "fullEnv": "[concat(variables('apiKeyEnv'), variables('aoaiEnv'), parameters('extraEnv'))]",
+            "secrets": "[if(empty(parameters('azureOpenAiApiKey')), createArray(), createArray(createObject('name', 'aoai-api-key', 'value', parameters('azureOpenAiApiKey'))))]",
+            "baseIpRules": [
+              {
+                "name": "AllowAPIMNatGateway",
+                "action": "Allow",
+                "ipAddressRange": "[format('{0}/32', parameters('natGatewayPublicIp'))]"
+              }
+            ],
+            "caeIpRule": "[if(empty(parameters('caeStaticIp')), createArray(), createArray(createObject('name', 'AllowACAEnvStatic', 'description', 'Allow same ACA environment static IP', 'action', 'Allow', 'ipAddressRange', format('{0}/32', parameters('caeStaticIp')))))]",
+            "ipRules": "[concat(variables('baseIpRules'), variables('caeIpRule'), variables('extraIpRules'))]"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.App/containerApps",
+              "apiVersion": "2024-10-02-preview",
+              "name": "[parameters('name')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {
+                "environmentId": "[resourceId('Microsoft.App/managedEnvironments', parameters('caeName'))]",
+                "workloadProfileName": "Consumption",
+                "configuration": {
+                  "activeRevisionsMode": "Single",
+                  "ingress": {
+                    "external": false,
+                    "targetPort": "[parameters('targetPort')]",
+                    "transport": "Auto",
+                    "allowInsecure": false,
+                    "ipSecurityRestrictions": "[variables('ipRules')]",
+                    "traffic": [
+                      {
+                        "latestRevision": true,
+                        "weight": 100
+                      }
+                    ]
+                  },
+                  "registries": [
+                    {
+                      "server": "[parameters('acrLoginServer')]",
+                      "identity": "system-environment"
+                    }
+                  ],
+                  "secrets": "[variables('secrets')]",
+                  "maxInactiveRevisions": 100
+                },
+                "template": {
+                  "revisionSuffix": "[variables('revisionSuffix')]",
+                  "containers": [
+                    {
+                      "name": "[parameters('name')]",
+                      "image": "[parameters('image')]",
+                      "resources": {
+                        "cpu": "[json(parameters('cpuCores'))]",
+                        "memory": "[parameters('memory')]"
+                      },
+                      "env": "[variables('fullEnv')]",
+                      "probes": [
+                        {
+                          "type": "Liveness",
+                          "httpGet": {
+                            "path": "/health",
+                            "port": "[parameters('targetPort')]",
+                            "scheme": "HTTP"
+                          },
+                          "initialDelaySeconds": 15,
+                          "periodSeconds": 20,
+                          "timeoutSeconds": 5,
+                          "successThreshold": 1,
+                          "failureThreshold": 3
+                        },
+                        {
+                          "type": "Readiness",
+                          "httpGet": {
+                            "path": "/health",
+                            "port": "[parameters('targetPort')]",
+                            "scheme": "HTTP"
+                          },
+                          "initialDelaySeconds": 5,
+                          "periodSeconds": 10,
+                          "timeoutSeconds": 5,
+                          "successThreshold": 1,
+                          "failureThreshold": 6
+                        },
+                        {
+                          "type": "Startup",
+                          "httpGet": {
+                            "path": "/health",
+                            "port": "[parameters('targetPort')]",
+                            "scheme": "HTTP"
+                          },
+                          "initialDelaySeconds": 5,
+                          "periodSeconds": 5,
+                          "timeoutSeconds": 3,
+                          "successThreshold": 1,
+                          "failureThreshold": 30
+                        }
+                      ]
+                    }
+                  ],
+                  "scale": {
+                    "minReplicas": "[parameters('minReplicas')]",
+                    "maxReplicas": "[parameters('maxReplicas')]",
+                    "cooldownPeriod": 300,
+                    "pollingInterval": 30,
+                    "rules": [
+                      {
+                        "name": "http-scaler",
+                        "http": {
+                          "metadata": {
+                            "concurrentRequests": "20"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ],
+          "outputs": {
+            "name": {
+              "type": "string",
+              "value": "[parameters('name')]"
+            },
+            "fqdn": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.App/containerApps', parameters('name')), '2024-10-02-preview').configuration.ingress.fqdn]"
+            },
+            "principalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.App/containerApps', parameters('name')), '2024-10-02-preview', 'full').identity.principalId]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'mod-acr')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-apps')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-cae')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-monitoring')]",
+        "[resourceId('Microsoft.Resources/deployments', 'mod-network')]"
+      ]
+    },
+    {
+      "condition": "[and(and(parameters('deployHfPrewarmJob'), parameters('deployStorage')), variables('deploySlmGpuApp'))]",
       "type": "Microsoft.Resources/deployments",
       "apiVersion": "2025-04-01",
       "name": "mod-hfprewarm",
@@ -2171,7 +3492,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.43.8.12551",
-              "templateHash": "2908840405096302502"
+              "templateHash": "10704285173210254734"
             }
           },
           "parameters": {
@@ -2267,7 +3588,7 @@
               }
             ],
             "jobEnv": "[if(empty(parameters('hfToken')), variables('jobEnvBase'), concat(createArray(createObject('name', 'HF_TOKEN', 'secretRef', 'hf-token')), variables('jobEnvBase')))]",
-            "downloadScript": "set -euo pipefail\r\necho \"[prewarm] model=$MODEL_NAME\"\r\necho \"[prewarm] cache=$HF_HOME\"\r\nmkdir -p \"$HF_HOME\"\r\ndf -h \"$HF_HOME\" || true\r\necho \"[prewarm] installing huggingface_hub + hf_transfer...\"\r\npython -m pip install --quiet --no-cache-dir --disable-pip-version-check \\\r\n    'huggingface_hub[cli]>=0.24' 'hf_transfer>=0.1.6'\r\necho \"[prewarm] downloading...\"\r\ntime huggingface-cli download \"$MODEL_NAME\" --cache-dir \"$HF_HOME\" --quiet\r\necho \"[prewarm] done. footprint:\"\r\ndu -sh \"$HF_HOME\" || true\r\n"
+            "downloadScript": "set -eu\r\necho \"[prewarm] model=$MODEL_NAME\"\r\necho \"[prewarm] cache=$HF_HOME\"\r\nmkdir -p \"$HF_HOME\"\r\ndf -h \"$HF_HOME\" || true\r\necho \"[prewarm] installing huggingface_hub + hf_transfer...\"\r\npython -m pip install --quiet --no-cache-dir --disable-pip-version-check 'huggingface_hub[cli]>=0.24' 'hf_transfer>=0.1.6'\r\necho \"[prewarm] downloading...\"\r\ntime huggingface-cli download \"$MODEL_NAME\" --cache-dir \"$HF_HOME\" --quiet\r\necho \"[prewarm] done. footprint:\"\r\ndu -sh \"$HF_HOME\" || true\r\n"
           },
           "resources": [
             {
@@ -2298,7 +3619,7 @@
                       "name": "prewarm",
                       "image": "[parameters('prewarmImage')]",
                       "command": [
-                        "/bin/bash",
+                        "/bin/sh",
                         "-c",
                         "[variables('downloadScript')]"
                       ],
@@ -2852,6 +4173,37 @@
       "type": "string",
       "value": "[reference(resourceId('Microsoft.Resources/deployments', 'mod-apps'), '2025-04-01').outputs.stage2PrincipalId.value]"
     },
+    "stage2Mode": {
+      "type": "string",
+      "value": "[variables('effectiveStage2Mode')]"
+    },
+    "orchestratorStage2TargetApp": {
+      "type": "string",
+      "value": "[variables('orchTargetAppName')]"
+    },
+    "stage2SlmFqdn": {
+      "type": "string",
+      "value": "[if(variables('deploySlmGpuApp'), reference(resourceId('Microsoft.Resources/deployments', 'mod-stage2-slm'), '2025-04-01').outputs.fqdn.value, '')]"
+    },
+    "stage2SlmPrincipalId": {
+      "type": "string",
+      "value": "[if(variables('deploySlmGpuApp'), reference(resourceId('Microsoft.Resources/deployments', 'mod-stage2-slm'), '2025-04-01').outputs.principalId.value, '')]"
+    },
+    "stage2AoaiFqdn": {
+      "type": "string",
+      "value": "[if(variables('deployAoaiCpuApp'), reference(resourceId('Microsoft.Resources/deployments', 'mod-stage2-aoai'), '2025-04-01').outputs.fqdn.value, '')]"
+    },
+    "stage2AoaiPrincipalId": {
+      "type": "string",
+      "value": "[if(variables('deployAoaiCpuApp'), reference(resourceId('Microsoft.Resources/deployments', 'mod-stage2-aoai'), '2025-04-01').outputs.principalId.value, '')]"
+    },
+    "stage2Variants": {
+      "type": "array",
+      "copy": {
+        "count": "[length(parameters('stage2Variants'))]",
+        "input": "[if(and(parameters('deployStage2'), variables('useStage2Variants')), createObject('name', reference(resourceId('Microsoft.Resources/deployments', format('mod-stage2-{0}', copyIndex())), '2025-04-01').outputs.name.value, 'fqdn', reference(resourceId('Microsoft.Resources/deployments', format('mod-stage2-{0}', copyIndex())), '2025-04-01').outputs.fqdn.value, 'principalId', reference(resourceId('Microsoft.Resources/deployments', format('mod-stage2-{0}', copyIndex())), '2025-04-01').outputs.principalId.value, 'image', format('{0}/{1}:{2}', reference(resourceId('Microsoft.Resources/deployments', 'mod-acr'), '2025-04-01').outputs.loginServer.value, parameters('stage2Variants')[copyIndex()].repo, parameters('stage2Variants')[copyIndex()].friendlyTag)), createObject('name', parameters('stage2Variants')[copyIndex()].name, 'fqdn', '', 'principalId', '', 'image', ''))]"
+      }
+    },
     "apimGatewayUrl": {
       "type": "string",
       "value": "[if(parameters('deployApim'), reference(resourceId('Microsoft.Resources/deployments', 'mod-apim'), '2025-04-01').outputs.gatewayUrl.value, '')]"
@@ -2878,7 +4230,7 @@
     },
     "hfPrewarmJobName": {
       "type": "string",
-      "value": "[if(and(and(parameters('deployHfPrewarmJob'), parameters('deployStorage')), parameters('deployStage2')), reference(resourceId('Microsoft.Resources/deployments', 'mod-hfprewarm'), '2025-04-01').outputs.jobName.value, '')]"
+      "value": "[if(and(and(parameters('deployHfPrewarmJob'), parameters('deployStorage')), variables('deploySlmGpuApp')), reference(resourceId('Microsoft.Resources/deployments', 'mod-hfprewarm'), '2025-04-01').outputs.jobName.value, '')]"
     }
   }
 }

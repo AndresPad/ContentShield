@@ -27,81 +27,47 @@ param contentSafetySku = 'S0'
 param acrSku = 'Premium'
 
 // ── Container Apps images ───────────────────────────────────────────────────
-// Defaults point to mcr quickstart so the first deploy succeeds before you push images.
-// After your images are in ACR, set these to e.g. '<acrName>.azurecr.io/contentshield:<tag>'.
+// Placeholder defaults so a first "empty ACR" deploy still succeeds. The real
+// images are chosen by tag below and imported into the customer ACR by
+// deploy.ps1 (server-side `az acr import` from the vendor ACR).
 param appImage = 'mcr.microsoft.com/k8se/quickstart:latest'
 param stage2Image = 'mcr.microsoft.com/k8se/quickstart:latest'
 param appTargetPort = 8080
 param stage2TargetPort = 8080
 
-// ── Stage-2 variant matrix (A/B/C cold-start test) ──────────────────────────
-// When non-empty, deploys ONE Stage-2 Container App per entry (replacing the
-// legacy single-Stage-2 path) so we can compare baked-local vs baked vs
-// cache-disabled side-by-side on the same NC24-A100 profile.
-//
-// Each entry uses the friendlyTag set during import. Pin by digest via:
-//   scripts/sync-images-from-vendor.ps1 -DigestMap @{
-//     'gemma4-31b-model-baked-local-20260519' = 'sha256:60d01ca0...'
-//     'gemma4-31b-model-baked-20260519'       = 'sha256:acf084b5...'
-//     'gemma4-31b-cache-disabled-20260519'    = 'sha256:11cd054e...'
-//   }
-//
-// IMPORTANT: do NOT put MODEL_NAME or HF_HOME in extraEnv for the baked
-// variants — the images self-configure those and overriding them breaks the
-// bake (baked-local enforces HF_HUB_OFFLINE=true and will refuse to start).
-param stage2Variants = [
-  {
-    name: 'ca-cs-stage2-baked-local'
-    repo: 'contentshield-stage2'
-    friendlyTag: 'gemma4-31b-model-baked-local-20260519'
-    mountNfs: false
-    // Production-facing variant: keep one replica always warm so the steady-
-    // state p50 is ~133 ms instead of 22+ minutes on cold-node. The first
-    // replica pins one NC24-A100 node (~$3-4/hr 24/7). Burst beyond 30
-    // concurrent requests adds a second replica (cold pull on a fresh node,
-    // 12-15 min) until the rate subsides.
-    minReplicas: 1
-    maxReplicas: 2
-    scalerConcurrentRequests: '30'
-  }
-  {
-    name: 'ca-cs-stage2-baked'
-    repo: 'contentshield-stage2'
-    friendlyTag: 'gemma4-31b-model-baked-20260519'
-    // Mount the NFS hfcache so vLLM uses it as the model cache when the
-    // image's baked cache is partial or stale. Acts as a secondary fallback
-    // path when HF Hub isn't reachable (e.g. AME).
-    mountNfs: true
-    extraEnv: [
-      {
-        name: 'HF_HOME'
-        value: '/mount/csaivllmnfsaxa1/hfcache'
-      }
-    ]
-    minReplicas: 0
-    maxReplicas: 1
-  }
-  {
-    name: 'ca-cs-stage2-cache-disabled'
-    repo: 'contentshield-stage2'
-    friendlyTag: 'gemma4-31b-cache-disabled-20260519'
-    // The cache-disabled image has no model baked in. Mounting NFS hfcache
-    // makes it AME-friendly: it can use a pre-populated share instead of
-    // downloading from HF Hub (which is blocked in AME). When the share is
-    // empty, the variant falls back to HF download on first cold start AND
-    // writes the result into the NFS share — that warms the cache for
-    // subsequent replicas.
-    mountNfs: true
-    extraEnv: [
-      {
-        name: 'HF_HOME'
-        value: '/mount/csaivllmnfsaxa1/hfcache'
-      }
-    ]
-    minReplicas: 0
-    maxReplicas: 1
-  }
-]
+// Orchestrator (contentshield repo) image tag in the customer ACR.
+param appImageTag = '1.0.2'
+
+// ── Stage-2 backend selection (THE ICM HANDOFF SWITCH) ──────────────────────
+// stage2Mode picks which Stage-2 backend(s) to deploy:
+//   'slm-gpu'  → GPU vLLM (Gemma). Needs A100 GPU quota. From Dockerfile.slm-gpu.
+//   'aoai-cpu' → CPU wrapper over Azure OpenAI gpt-4o. No GPU. From Dockerfile.aoai-cpu.
+//   'both'     → deploy both side-by-side (this demo RG).
+//   'none'     → skip Stage-2.
+// ICM teams typically set this to 'slm-gpu' OR 'aoai-cpu'. Override on the CLI
+// with deploy.ps1 -Stage2Mode <mode>.
+param stage2Mode = 'both'
+
+// When both are deployed, which one the orchestrator routes to (SLM_ENDPOINT).
+// Flip to 'slm-gpu' (revision-only change) to demo the GPU path end-to-end.
+param orchestratorStage2Target = 'aoai-cpu'
+
+// Stage-2 image tags in the customer ACR (contentshield-stage2 repo).
+param slmGpuStage2ImageTag = '1.0.3-dev.20260714b-slm-gpu'
+param aoaiCpuStage2ImageTag = '1.0.3-dev.20260715-sdk-retry-aoai-cpu'
+
+// ── Azure OpenAI (used only by the aoai-cpu Stage-2) ────────────────────────
+// The aoai-cpu wrapper calls this gpt-4o deployment. RBAC (Cognitive Services
+// OpenAI User) on the account is granted by deploy.ps1 -AzureOpenAiResourceId,
+// or pass -AzureOpenAiApiKey to use key auth instead of managed identity.
+param azureOpenAiEndpoint = 'https://ratioaifoundrycentralus.cognitiveservices.azure.com/'
+param azureOpenAiDeployment = 'gpt-4o'
+param azureOpenAiApiVersion = '2024-10-21'
+
+// ── Advanced: legacy GPU variant matrix (A/B cold-start testing) ────────────
+// Leave EMPTY to use the clean stage2Mode path above. When non-empty it takes
+// precedence and deploys one GPU Container App per entry (see modules/stage2App.bicep).
+param stage2Variants = []
 
 // ── GPU configuration ───────────────────────────────────────────────────────
 // Set deployStage2 = false initially if you do not have GPU quota in the target region.
@@ -114,9 +80,11 @@ param deployStage2 = true
 param extraStage2AllowedIps = []
 
 // ── Storage (Premium FileStorage + NFS hfcache share) ──────────────────────
-// Replica of ratioaivllmnfs from rg-ratio-ai-dev. Mount path inside stage-2 is
-// /mount/<storageAccountName>/hfcache and HF_HOME is set accordingly.
-param deployStorage = true
+// Only needed when a GPU Stage-2 image downloads its model at runtime and
+// caches it on NFS. The slm-gpu image (1.0.3-dev.*-slm-gpu) is fully baked /
+// offline, and the aoai-cpu image has no local model — so storage is OFF here.
+// Set true only if you switch to a non-baked GPU image that needs hfcache.
+param deployStorage = false
 // Override storageAccountName if you need an explicit name (3-24 lowercase alphanumeric, globally unique).
 // Default = csaivllmnfs<nameSuffix>
 // param storageAccountName = 'csaivllmnfsicm'

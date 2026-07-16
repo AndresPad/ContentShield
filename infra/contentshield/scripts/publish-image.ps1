@@ -38,6 +38,10 @@
 .PARAMETER Platform
   Image platform, default 'linux/amd64'. GPU images must be amd64.
 
+.PARAMETER BuildTimeoutSeconds
+  ACR Task timeout. Defaults to four hours because baked GPU images download
+  and package model weights during the server-side build.
+
 .PARAMETER MoveLatest
   Also re-tag :latest -> this digest. Default $false; ':latest' should only
   move in dev. Production deploys pin semver, never :latest.
@@ -76,6 +80,7 @@ param(
     [Parameter(Mandatory)][string]$Dockerfile,
     [string]$ContextPath = '.',
     [string]$Platform = 'linux/amd64',
+    [ValidateRange(300, 21600)][int]$BuildTimeoutSeconds = 14400,
     [switch]$MoveLatest,
     [bool]$LockTag = $true,
     [switch]$Sign
@@ -84,7 +89,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ── Validate semver-ish ──────────────────────────────────────────────────────
-if ($Version -notmatch '^\d+\.\d+\.\d+([-+][\w\.]+)?$') {
+if ($Version -notmatch '^\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$') {
     Write-Warning "Version '$Version' does not look like semver (MAJOR.MINOR.PATCH[-pre]). Continuing anyway."
 }
 
@@ -113,7 +118,8 @@ $buildArgs = @(
     '-r', $VendorAcrName,
     '-t', $imageRef,
     '-f', $Dockerfile,
-    '--platform', $Platform
+    '--platform', $Platform,
+    '--timeout', $BuildTimeoutSeconds
 )
 foreach ($t in $extraTags) { $buildArgs += @('-t', $t) }
 $buildArgs += @('--only-show-errors', $ContextPath)
@@ -123,7 +129,27 @@ if ($LASTEXITCODE -ne 0) { throw "az acr build failed." }
 Write-Host "[OK] build complete" -ForegroundColor Green
 
 # ── Resolve digest of the new manifest ───────────────────────────────────────
-$digest = az acr repository show -n $VendorAcrName --image $imageRef --query digest -o tsv
+$digest = az acr repository show -n $VendorAcrName --image $imageRef --query digest -o tsv 2>$null
+if (-not $digest) {
+  # Tag metadata can lag immediately after a large push. The completed ACR
+  # run record contains the output digest as soon as the build returns.
+  $recentRuns = az acr task list-runs `
+    --registry $VendorAcrName `
+    --top 20 `
+    -o json 2>$null | ConvertFrom-Json
+  $digest = $recentRuns |
+    Where-Object { $_.status -eq 'Succeeded' } |
+    ForEach-Object { $_.outputImages } |
+    Where-Object { $_.repository -eq $Repository -and $_.tag -eq $Version } |
+    Select-Object -First 1 -ExpandProperty digest
+}
+if (-not $digest) {
+  $digest = az acr manifest show-metadata `
+    --registry $VendorAcrName `
+    --name $imageRef `
+    --query digest `
+    -o tsv 2>$null
+}
 if (-not $digest) { throw "Could not resolve digest for $imageRef." }
 Write-Host "Manifest digest: $digest" -ForegroundColor Gray
 

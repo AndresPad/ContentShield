@@ -18,12 +18,37 @@ End-to-end Bicep template that provisions the ContentShield workload into an **e
 | 6 | Virtual Network + 3 subnets | `network.bicep` | `vllm-subnet`, `vllm-gpu-subnet`, `vllm-apim-subnet` |
 | 7 | Azure Container Registry | `acr.bicep` | `contentshieldacr<suffix>`, Premium, system MI |
 | 8 | Container Apps Environment | `containerAppsEnv.bicep` | Workload profiles: `Consumption` + `NC24-A100` GPU |
-| 9 | Container App — `ca-ratio-contentshield` | `containerApps.bicep` | Consumption profile, external, IP-allowlist to NAT GW |
-| 9 | Container App — `ca-contentshield-stage2` | `containerApps.bicep` | **GPU** (`NC24-A100`), internal, ingress IP-allowlist (NAT GW + CAE static IP + optional extras), NFS mount at `/mount/<storage>/hfcache` |
-| 10 | Premium FileStorage account + NFS `hfcache` share | `storage.bicep` | `csaivllmnfs<suffix>`, FileStorage / Premium_LRS, OAuth-only, VNet-restricted to CAE + GPU subnets |
+| 9 | Container App — `ca-ratio-contentshield` | `containerApps.bicep` | **Orchestrator**. Consumption profile, external, IP-allowlist to NAT GW. Routes to the selected Stage-2 via `SLM_ENDPOINT`. |
+| 9a | Container App — `ca-cs-stage2-slm` *(mode `slm-gpu` / `both`)* | `stage2App.bicep` | **SLM-GPU** — vLLM (Gemma) on `NC24-A100`, internal ingress IP-allowlist. Baked/offline image — no NFS / HF token needed. |
+| 9b | Container App — `ca-cs-stage2-aoai` *(mode `aoai-cpu` / `both`)* | `stage2AoaiApp.bicep` | **AOAI-CPU** — CPU wrapper over an Azure OpenAI gpt-4o deployment. Consumption profile, internal ingress. **No GPU.** |
+| 10 | *(optional)* Premium FileStorage + NFS `hfcache` share | `storage.bicep` | `deployStorage=false` by default (the baked slm image needs no NFS). Enable only for a non-baked GPU image. |
 | 11 | API Management | `apim.bicep` | StandardV2, VNet External, 30–45 min provision |
 
-All resources use **system-assigned managed identities**. The Container Apps Environment's system MI is automatically granted `AcrPull` on the ACR so container apps pull images via `registries: { identity: 'system-environment' }` (no passwords).
+All resources use **system-assigned managed identities**. The Container Apps Environment's system MI is automatically granted `AcrPull` on the ACR so container apps pull images via `registries: { identity: 'system-environment' }` (no passwords). The `aoai-cpu` Stage-2 app's MI is granted `Cognitive Services OpenAI User` on the target Azure OpenAI account (by `deploy.ps1` via `-AzureOpenAiResourceId`, cross-RG supported).
+
+## Stage-2 backend selection (the ICM handoff switch)
+
+One parameter, `stage2Mode`, chooses which Stage-2 backend(s) to deploy. Set it in `main.bicepparam` or override with `deploy.ps1 -Stage2Mode <mode>`:
+
+| `stage2Mode` | Deploys | When |
+|---|---|---|
+| `slm-gpu` | `ca-cs-stage2-slm` only (GPU vLLM/Gemma) | You have A100 GPU quota |
+| `aoai-cpu` | `ca-cs-stage2-aoai` only (Azure OpenAI gpt-4o, no GPU) | No GPU quota / cheapest |
+| `both` | both, side-by-side | Demo / evaluation RG |
+| `none` | no Stage-2 | Orchestrator-only testing |
+
+- **Images** come from three tags in the customer ACR, chosen by `appImageTag`, `slmGpuStage2ImageTag`, and `aoaiCpuStage2ImageTag`. `deploy.ps1` server-side `az acr import`s exactly the tags the selected mode needs from the vendor ACR (`-VendorAcr`, default `ratioaidev.azurecr.io`, AAD auth).
+- **Orchestrator routing:** when `both` is deployed, `orchestratorStage2Target` (`slm-gpu` | `aoai-cpu`) picks which Stage-2 the orchestrator calls. Flipping it is a revision-only change.
+- **AOAI config:** `azureOpenAiEndpoint` / `azureOpenAiDeployment` / `azureOpenAiApiVersion` point the `aoai-cpu` wrapper at a gpt-4o deployment; the app MI is granted access via `-AzureOpenAiResourceId` (or pass `-AzureOpenAiApiKey` for key auth).
+
+```powershell
+# ICM: deploy only the AOAI-CPU Stage-2 against their own Foundry/AOAI account
+.\deploy.ps1 -ResourceGroup <rg> -ApimPublisherEmail you@contoso.com `
+    -Stage2Mode aoai-cpu -AzureOpenAiResourceId <their-aoai-account-resource-id>
+
+# ICM: deploy only the SLM-GPU Stage-2 (needs A100 quota)
+.\deploy.ps1 -ResourceGroup <rg> -ApimPublisherEmail you@contoso.com -Stage2Mode slm-gpu
+```
 
 ## Naming
 
@@ -35,7 +60,7 @@ All resources use **system-assigned managed identities**. The Container Apps Env
 | `contentshieldacr<suffix>` (no dash, ACR rules) | `NSG-contentshield-vllm-gpu-subnet-westus3` |
 | `cae-contentshield-<suffix>` | `vnet-contentshield-westus3` |
 | `apim-contentshield-<suffix>` | `ca-ratio-contentshield` |
-| `csaivllmnfs<suffix>` (no dash, storage rules) | `ca-contentshield-stage2` |
+| `csaivllmnfs<suffix>` (no dash, storage rules) | `ca-cs-stage2-slm` / `ca-cs-stage2-aoai` |
 |  |  |
 
 `nameSuffix` defaults to `take(uniqueString(subscription().id), 6)` — a deterministic 6-char hash of the subscription id, so every customer (and every dev sub) gets globally-unique names with zero configuration. Override via `-NameSuffix <token>` or set `param nameSuffix = '…'` in `main.bicepparam`.
@@ -49,60 +74,17 @@ az group create -n rg-contentshield -l westus3   # only if missing
 # 2. (Optional) Create your own replica of the RatioAIDev app registration
 .\scripts\create-app-registration.ps1 -DisplayName "ContentShield-Dev"
 
-# 3. First deploy (skip APIM + GPU for fastest iteration)
+# 3. Deploy. deploy.ps1 imports the images (by tag) into the new ACR, then
+#    wires the container apps — no manual docker push / param edits needed.
+#    Pick the Stage-2 backend with -Stage2Mode (default 'both').
 .\deploy.ps1 `
     -ResourceGroup rg-contentshield `
     -ApimPublisherEmail you@contoso.com `
-    -SkipApim -SkipStage2
+    -Stage2Mode aoai-cpu          # or slm-gpu / both
 
-# 4. Push your container images to the new ACR, then update main.bicepparam
-#    (appImage / stage2Image) and re-run without -SkipApim / -SkipStage2.
-.\deploy.ps1 -ResourceGroup rg-contentshield -ApimPublisherEmail you@contoso.com
-```
-
-## Side deployment — eastus GPU smoke test
-
-A second, focused template ([`eastus-gpu-test.bicep`](./eastus-gpu-test.bicep)) deploys **only** the Stage-2 Container Apps into the **existing** `cae-ratio-ai-dev-eastus` Container Apps Environment (in `rg-ratio-ai-dev`) so you can validate the recently-granted *"Managed Environment Consumption NCA100 GPUs"* quota in eastus end-to-end without touching the production westus3 stack.
-
-What it does **not** create: CAE, VNet, ACR, storage, APIM, Log Analytics. It reuses the existing eastus environment.
-
-```powershell
-# Optional one-time: grant the eastus CAE managed identity AcrPull on ratioai.azurecr.io
-$envMiPid = az containerapp env show -g rg-ratio-ai-dev -n cae-ratio-ai-dev-eastus --query 'identity.principalId' -o tsv
-$acrId    = az acr show --name ratioai --query id -o tsv
-az role assignment create --assignee-object-id $envMiPid --assignee-principal-type ServicePrincipal `
-    --role AcrPull --scope $acrId
-
-# Deploy the three Stage-2 variants pinned to ratioai.azurecr.io/contentshield-stage2:1.0.1
-.\deploy-eastus-gpu-test.ps1 -ResourceGroup rg-contentshield
-
-# Or pin all three variants to a different tag:
-.\deploy-eastus-gpu-test.ps1 -ResourceGroup rg-contentshield -ImageTag '1.0.1'
-
-# Cache-disabled variant downloads from HF Hub on first start — pass a token:
-.\deploy-eastus-gpu-test.ps1 -ResourceGroup rg-contentshield -HfToken (Get-Content .\.hf-token -Raw).Trim()
-```
-
-Resulting Container Apps (in `rg-contentshield`, region `eastus`, pinned to the eastus CAE):
-
-| Name | Image | Workload profile | minReplicas |
-|------|-------|------------------|-------------|
-| `ca-cs-stage2-eastus-baked-local`    | `ratioai.azurecr.io/contentshield-stage2:1.0.1` | `NC24-A100` | 1 (warm GPU pinned for quota validation) |
-| `ca-cs-stage2-eastus-baked`          | `ratioai.azurecr.io/contentshield-stage2:1.0.1` | `NC24-A100` | 0 |
-| `ca-cs-stage2-eastus-cache-disabled` | `ratioai.azurecr.io/contentshield-stage2:1.0.1` | `NC24-A100` | 0 (needs `HF_TOKEN`) |
-
-Pre-flight notes:
-
-* The CAE must already have a workload profile of type `Consumption-GPU-NC24-A100` (default name `NC24-A100`). The deploy script will warn and list current profiles if the name doesn't match.
-* The eastus CAE's system MI must have `AcrPull` on `ratioai.azurecr.io` (one-time grant above).
-* Container Apps live in `rg-contentshield` per request, but the CAE id (in `rg-ratio-ai-dev`) is what determines region, networking, and storage.
-
-Tear down (without touching the CAE):
-
-```powershell
-az containerapp delete -g rg-contentshield -n ca-cs-stage2-eastus-baked-local    --yes
-az containerapp delete -g rg-contentshield -n ca-cs-stage2-eastus-baked          --yes
-az containerapp delete -g rg-contentshield -n ca-cs-stage2-eastus-cache-disabled --yes
+# Fast iteration: add -SkipApim (APIM is the slow part). Add -Reset to wipe the
+# RG first (RG + role assignments preserved; soft-deleted APIM/CS are purged).
+.\deploy.ps1 -ResourceGroup rg-contentshield -ApimPublisherEmail you@contoso.com -SkipApim
 ```
 
 ## Reset (delete everything inside the RG)
@@ -112,7 +94,7 @@ az containerapp delete -g rg-contentshield -n ca-cs-stage2-eastus-cache-disabled
 .\deploy.ps1 -ResourceGroup rg-contentshield -Reset ...     # reset + redeploy
 ```
 
-`reset.ps1` deletes resources in dependency-safe order, waits for APIM deletion to release its subnet, purges soft-deleted Cognitive Services accounts, and then sweeps anything left over. The RG is preserved.
+`reset.ps1` deletes resources in dependency-safe order, waits for APIM deletion to release its subnet, **purges soft-deleted APIM and Cognitive Services accounts** (so a same-name redeploy is not blocked by `ServiceAlreadyExistsInSoftDeletedState`), and then sweeps anything left over. The RG is preserved.
 
 ## Configurable parameters (highlights)
 
@@ -122,11 +104,18 @@ az containerapp delete -g rg-contentshield -n ca-cs-stage2-eastus-cache-disabled
 | `nameSuffix` | `icm` | Appended to globally-unique resources |
 | `vnetAddressPrefix` | `10.40.0.0/16` | Change if conflicts with peers |
 | `gpuWorkloadProfileType` | `Consumption-GPU-NC24-A100` | Use `Consumption-GPU-NC8as-T4` for T4 |
-| `deployStage2` | `true` | Set false if no GPU quota |
+| `stage2Mode` | `both` | `slm-gpu` \| `aoai-cpu` \| `both` \| `none` — which Stage-2 backend(s) to deploy |
+| `orchestratorStage2Target` | `aoai-cpu` | When `both` is deployed, which Stage-2 the orchestrator calls |
+| `appImageTag` | `1.0.2` | Orchestrator (`contentshield`) tag in the customer ACR |
+| `slmGpuStage2ImageTag` | `1.0.3-dev.20260714b-slm-gpu` | SLM-GPU (`contentshield-stage2`) tag |
+| `aoaiCpuStage2ImageTag` | `1.0.3-dev.20260715-sdk-retry-aoai-cpu` | AOAI-CPU (`contentshield-stage2`) tag |
+| `azureOpenAiEndpoint` | Foundry endpoint | gpt-4o endpoint for the `aoai-cpu` Stage-2 (required for that mode) |
+| `azureOpenAiDeployment` | `gpt-4o` | Azure OpenAI deployment name |
+| `deployStage2` | `true` | Master off-switch; `false` forces `stage2Mode=none` |
 | `deployApim` | `true` | Set false for fast iteration |
-| `appImage` / `stage2Image` | mcr quickstart | Replace with your ACR images |
-| `hfToken` | `''` | Hugging Face token for stage-2 model download |
-| `deployStorage` | `true` | Create a Premium FileStorage replica of `ratioaivllmnfs` in this RG |
+| `appImage` / `stage2Image` | mcr quickstart | Placeholder images used before the tag-based import runs |
+| `hfToken` | `''` | Hugging Face token (only if a non-baked GPU image downloads at runtime) |
+| `deployStorage` | `false` | Create a Premium FileStorage + NFS share (only needed for a non-baked GPU image) |
 | `storageAccountName` | `csaivllmnfs<suffix>` | Override only if you need a specific name |
 | `hfCacheShareName` / `hfCacheShareQuotaGiB` | `hfcache` / `500` | NFS share name and quota |
 | `nfsServer` / `nfsShareName` | `''` | Only used when `deployStorage = false` (point at an external account) |
@@ -188,19 +177,20 @@ no local docker needed:
 
 ### After either option
 
-Set the image references in `main.bicepparam`:
+The default `deploy.ps1` flow selects images by **tag** (`appImageTag`,
+`slmGpuStage2ImageTag`, `aoaiCpuStage2ImageTag` in `main.bicepparam`) and
+imports them for you, so you normally don't set full image references. If you
+imported images manually under a different tag, update those tag params (or the
+`appImage` / `stage2Image` placeholders) and re-run `.\deploy.ps1`.
 
-```bicep
-param appImage    = 'contentshieldacricm.azurecr.io/contentshield:latest'
-param stage2Image = 'contentshieldacricm.azurecr.io/contentshield-stage2:latest'
-```
+## Storage / NFS mount
 
-Then re-run `.\deploy.ps1` to roll the new images into the container apps.
+> Optional — **off by default** (`deployStorage=false`). The `slm-gpu` image is baked/offline and the `aoai-cpu` image has no local model, so neither needs NFS. Enable this only for a non-baked GPU image that downloads its model at runtime.
 
-## Storage / NFS mount- The bicep deploys `csaivllmnfs<suffix>` as `kind=FileStorage`, `Premium_LRS`, with `allowSharedKeyAccess=false`, `supportsHttpsTrafficOnly=false` (required for NFS 4.1), `largeFileSharesState=Enabled`.
+- When `deployStorage=true`, the bicep deploys `csaivllmnfs<suffix>` as `kind=FileStorage`, `Premium_LRS`, with `allowSharedKeyAccess=false`, `supportsHttpsTrafficOnly=false` (required for NFS 4.1), `largeFileSharesState=Enabled`.
 - Public network is restricted to the CAE subnet (`vllm-subnet`) and GPU subnet (`vllm-gpu-subnet`) via `Microsoft.Storage` service endpoints already configured on those subnets.
 - A single NFS file share (`hfcache`, 500 GiB, `NoRootSquash`) is created and registered on the CAE as a managed `NfsAzureFile` storage named `hfcache`.
-- `ca-contentshield-stage2` mounts the share at `/mount/<storageAccountName>/hfcache`; `HF_HOME` is set to the same path automatically.
+- The GPU Stage-2 app (`ca-cs-stage2-slm`, when configured to mount NFS) uses the share at `/mount/<storageAccountName>/hfcache`; `HF_HOME` is set to the same path automatically.
 - Sample VM mount command (from any host on an allowed subnet):
   ```bash
   sudo mkdir -p /mount/csaivllmnfsicm/hfcache
@@ -223,8 +213,14 @@ infra/contentshield/
 │   ├── storage.bicep
 │   ├── acr.bicep
 │   ├── containerAppsEnv.bicep
-│   ├── containerApps.bicep
+│   ├── containerApps.bicep      # orchestrator (+ legacy single GPU stage-2)
+│   ├── stage2App.bicep         # SLM-GPU Stage-2 (mode slm-gpu / variant matrix)
+│   ├── stage2AoaiApp.bicep     # AOAI-CPU Stage-2 (mode aoai-cpu)
+│   ├── hfPrewarmJob.bicep
 │   └── apim.bicep
 └── scripts/
-    └── create-app-registration.ps1
+    ├── create-app-registration.ps1
+    ├── sync-images-from-vendor.ps1   # advanced token/AAD multi-tag import
+    ├── export-images.ps1 / import-images.ps1  # offline tarball path
+    └── preflight.ps1
 ```

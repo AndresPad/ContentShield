@@ -1,0 +1,46 @@
+# syntax=docker/dockerfile:1
+# GPU Stage2 image with the evaluated RedHat Gemma 4 26B A4B FP8 checkpoint
+# already baked in. Replace the base image's development vLLM build and
+# compressed-tensors loader with their matching stable 0.19.1 release versions.
+ARG BAKED_MODEL_IMAGE=ratioai.azurecr.io/contentshield-stage2@sha256:1f6f0b04a807e383ce401f11fe10fc648d0b2a571d60e164560984973d2632d4
+FROM ${BAKED_MODEL_IMAGE}
+
+WORKDIR /workspace
+
+# The existing CUDA/Torch dependency set was built for vLLM 0.19.1. Installing
+# only these wheels avoids a second copy of the multi-GB CUDA stack and replaces
+# the incompatible dev loader (0.19.1.dev6 + compressed-tensors 0.14.0.1).
+RUN python3 -m pip install --no-cache-dir --force-reinstall --no-deps \
+        "vllm==0.19.1" "compressed-tensors==0.15.0.1" \
+    && python3 -c "from importlib.metadata import version; import vllm; assert vllm.__version__ == '0.19.1', vllm.__version__; assert version('compressed-tensors') == '0.15.0.1'; print('vLLM', vllm.__version__, 'compressed-tensors', version('compressed-tensors'))"
+
+COPY src/stage2 /workspace/stage2
+COPY prompts/pi-classifier-v7-en.txt /workspace/prompts/pi-classifier-v7-en.txt
+COPY prompts/pi-reason-v1.txt /workspace/prompts/pi-reason-v1.txt
+COPY deploy/scripts/start-vllm.sh /workspace/scripts/start-vllm.sh
+
+RUN sed -i 's/\r$//' /workspace/scripts/start-vllm.sh \
+    && chmod +x /workspace/scripts/start-vllm.sh
+
+ENV PYTHONPATH=/workspace \
+    PYTHONUNBUFFERED=1 \
+    STAGE2_BACKEND=vllm \
+    PROMPT_PATH=/workspace/prompts/pi-classifier-v7-en.txt \
+    REASON_PROMPT_PATH=/workspace/prompts/pi-reason-v1.txt \
+    ENABLE_STAGE2_REASON=false \
+    MAX_REASON_TOKENS=256 \
+    MODEL_NAME=RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic \
+    BAKED_MODEL_PATH=/opt/models/gemma-4-26B-A4B-it-FP8-dynamic \
+    STAGE2_PREFER_BAKED_MODEL=true \
+    EXTRA_ENGINE_ARGS="--enable-prefix-caching" \
+    LANGUAGE_MODEL_ONLY=true \
+    MAX_MODEL_LEN=20000 \
+    GPU_MEMORY_UTILIZATION=0.9 \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    STAGE2_PREFLIGHT_MODEL_CHECK=false \
+    VLLM_REQUIRE_READY_BEFORE_WRAPPER=true
+
+EXPOSE 8080
+
+ENTRYPOINT ["/workspace/scripts/start-vllm.sh"]

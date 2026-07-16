@@ -425,3 +425,4 @@ Assets/artifacts/*.nupkg
 # for clean-clone reproducible builds.
 uv.lock
 !RatioAI.ContentShield/uv.lock
+!RatioAI.ContentShield/services/stage2/uv.lock

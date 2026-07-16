@@ -1,9 +1,17 @@
 [project]
 name = "contentshield-stage2"
 version = "0.1.0"
-description = "ContentShield Stage-2 vLLM detector service"
+description = "ContentShield Stage-2 model detector service"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+	"aiohttp>=3.9.0",
+	"azure-identity>=1.17.0",
+	"fastapi>=0.115.0",
+	"httpx>=0.27.0",
+	"openai>=1.98.0",
+	"pydantic>=2.0.0",
+	"uvicorn[standard]>=0.32.0",
+]
 
 [build-system]
 requires = ["hatchling"]

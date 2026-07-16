@@ -73,10 +73,17 @@ if ($apims) {
     Write-Host "  Waiting up to 25 min for APIM deletion to release subnet..." -ForegroundColor Gray
     $deadline = (Get-Date).AddMinutes(25)
     while ((Get-Date) -lt $deadline) {
-        $remaining = az resource list -g $ResourceGroup --resource-type 'Microsoft.ApiManagement/service' --query "length(@)" -o tsv 2>$null
-        if ($remaining -eq '0' -or -not $remaining) { break }
+        $remaining = @(az resource list -g $ResourceGroup --resource-type 'Microsoft.ApiManagement/service' --query "[].id" -o tsv 2>$null | Where-Object { $_ }).Count
+        if ($remaining -eq 0) { break }
         Start-Sleep -Seconds 30
         Write-Host "    ...still waiting ($remaining APIM left)" -ForegroundColor DarkGray
+    }
+
+    # APIM soft-deletes on delete. Purge each soft-deleted service so a redeploy
+    # with the same name is not blocked by ServiceAlreadyExistsInSoftDeletedState.
+    foreach ($apim in $apims -split "`n" | Where-Object { $_ }) {
+        Write-Host "  Purging soft-deleted APIM $apim (can take several minutes)..." -ForegroundColor Gray
+        az apim deletedservice purge --service-name $apim --location $location 2>$null | Out-Null
     }
 }
 
@@ -124,8 +131,13 @@ if ($leftover) {
     }
 }
 
-$final = az resource list -g $ResourceGroup --query "length(@)" -o tsv
+$final = @(az resource list -g $ResourceGroup --query "[].id" -o tsv 2>$null | Where-Object { $_ }).Count
 Write-Host "`nReset complete. Resources remaining in '$ResourceGroup': $final" -ForegroundColor Green
-if ($final -ne '0') {
+if ($final -ne 0) {
     Write-Host "  (Re-run -Reset if anything stubborn remains — some deletions are async.)" -ForegroundColor Yellow
 }
+
+# Ensure a clean, deterministic exit code so callers (deploy.ps1 -Reset) do not
+# mistake a non-zero code from the last az call for a reset failure.
+$global:LASTEXITCODE = 0
+exit 0

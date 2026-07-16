@@ -54,6 +54,27 @@ param(
     [Parameter(Mandatory)][string]$ApimPublisherEmail,
     [string]$HfToken = '',
 
+    # ── Stage-2 backend selection (ICM handoff switch) ────────────────────
+    #   slm-gpu  : GPU vLLM (Gemma) only        (needs A100 quota)
+    #   aoai-cpu : Azure OpenAI gpt-4o only      (no GPU)
+    #   both     : deploy both (our demo RG)
+    #   none     : skip Stage-2
+    [ValidateSet('slm-gpu','aoai-cpu','both','none')]
+    [string]$Stage2Mode = 'both',
+
+    # Vendor ACR to import the ContentShield images from (same-tenant, AAD auth).
+    [string]$VendorAcr = 'ratioaidev.azurecr.io',
+    [string]$AppImageTag = '1.0.2',
+    [string]$SlmGpuStage2ImageTag = '1.0.3-dev.20260714b-slm-gpu',
+    [string]$AoaiCpuStage2ImageTag = '1.0.3-dev.20260715-sdk-retry-aoai-cpu',
+
+    # Azure OpenAI account backing the aoai-cpu Stage-2. The ResourceId is used
+    # to grant the app managed identity 'Cognitive Services OpenAI User' (works
+    # cross-resource-group). Pass -AzureOpenAiApiKey instead to use key auth
+    # (which skips the RBAC grant).
+    [string]$AzureOpenAiResourceId = '/subscriptions/01819f01-7af1-4dd8-9354-9dccc163ceae/resourceGroups/rg-ratio-ai-dev/providers/Microsoft.CognitiveServices/accounts/RatioAIFoundryCentralUS',
+    [string]$AzureOpenAiApiKey = '',
+
     # ── Vendor image-pull credentials (optional). When provided, deploy.ps1
     #    auto-imports vendor images into the customer's ACR before container
     #    apps are pointed at them.
@@ -106,7 +127,7 @@ if (-not $SkipPreflight) {
     & (Join-Path $infraDir 'scripts\preflight.ps1') `
         -ResourceGroup $ResourceGroup `
         -Location $Location `
-        -CheckGpuQuota:(-not $SkipStage2)
+        -CheckGpuQuota:(($Stage2Mode -in @('slm-gpu','both')) -and -not $SkipStage2)
     if ($LASTEXITCODE -ne 0) { throw "Pre-flight failed. Re-run with -SkipPreflight to override (not recommended)." }
 }
 
@@ -135,17 +156,33 @@ if ($Reset) {
 $bicepFile = Join-Path $infraDir 'main.bicep'
 $paramFile = Join-Path $infraDir 'main.bicepparam'
 
-$useVendorImport = $VendorAcrFqdn -and -not $SkipImageImport -and (
-    $UseAad -or ($VendorAcrTokenName -and $VendorAcrTokenPassword)
-)
-$phase1AppImages = $useVendorImport   # phase 1 uses placeholder images so container apps deploy before images exist
+$doImport = -not $SkipImageImport
 
-# A reusable function that runs one bicep deployment with optional image overrides.
+# Import one repo:tag from the vendor ACR into the customer ACR, server-side
+# (blob-to-blob inside Azure) using the caller's AAD identity. Both registries
+# are in the same tenant, so no scoped token is required.
+function Import-ContentShieldImage {
+    param(
+        [Parameter(Mandatory)][string]$TargetAcr,
+        [Parameter(Mandatory)][string]$VendorAcr,
+        [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][string]$Tag
+    )
+    if ($WhatIf) {
+        Write-Host "  [what-if] import $VendorAcr/${Repo}:${Tag} -> $TargetAcr" -ForegroundColor DarkGray
+        return
+    }
+    Write-Host "  $VendorAcr/${Repo}:${Tag} -> $TargetAcr.azurecr.io/${Repo}:${Tag}" -ForegroundColor Gray
+    az acr import --name $TargetAcr --source "$VendorAcr/${Repo}:${Tag}" --image "${Repo}:${Tag}" --force --only-show-errors 2>&1 | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Image import failed for ${Repo}:${Tag} from $VendorAcr" }
+}
+
+# A reusable function that runs one bicep deployment.
 function Invoke-BicepDeployment {
     param(
         [Parameter(Mandatory)][string]$Label,
-        [string]$AppImageTagOverride,
-        [string]$Stage2ImageTagOverride
+        [string]$Stage2ModeOverride,
+        [switch]$PlaceholderImages
     )
     $deploymentName = "contentshield-$Label-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
     $cmd = @(
@@ -158,12 +195,22 @@ function Invoke-BicepDeployment {
             "location=$Location",
             "apimPublisherEmail=$ApimPublisherEmail"
     )
-    if ($NameSuffix)             { $cmd += @('--parameters', "nameSuffix=$NameSuffix") }
-    if ($SkipApim)               { $cmd += @('--parameters','deployApim=false') }
-    if ($SkipStage2)             { $cmd += @('--parameters','deployStage2=false') }
-    if ($HfToken)                { $cmd += @('--parameters', "hfToken=$HfToken") }
-    if ($AppImageTagOverride)    { $cmd += @('--parameters', "appImageTag=$AppImageTagOverride") }
-    if ($Stage2ImageTagOverride) { $cmd += @('--parameters', "stage2ImageTag=$Stage2ImageTagOverride") }
+    $mode = if ($Stage2ModeOverride) { $Stage2ModeOverride } else { $Stage2Mode }
+    $cmd += @('--parameters', "stage2Mode=$mode")
+    if ($NameSuffix)        { $cmd += @('--parameters', "nameSuffix=$NameSuffix") }
+    if ($SkipApim)          { $cmd += @('--parameters','deployApim=false') }
+    if ($SkipStage2)        { $cmd += @('--parameters','deployStage2=false') }
+    if ($HfToken)           { $cmd += @('--parameters', "hfToken=$HfToken") }
+    if ($AzureOpenAiApiKey) { $cmd += @('--parameters', "azureOpenAiApiKey=$AzureOpenAiApiKey") }
+    if ($PlaceholderImages) {
+        # Phase 1: blank tags so container apps run the mcr placeholder while we import.
+        $cmd += @('--parameters','appImageTag=','slmGpuStage2ImageTag=','aoaiCpuStage2ImageTag=')
+    } else {
+        $cmd += @('--parameters',
+            "appImageTag=$AppImageTag",
+            "slmGpuStage2ImageTag=$SlmGpuStage2ImageTag",
+            "aoaiCpuStage2ImageTag=$AoaiCpuStage2ImageTag")
+    }
 
     if ($WhatIf) {
         Write-Host "Running what-if for phase '$Label'..." -ForegroundColor Yellow
@@ -182,35 +229,57 @@ function Invoke-BicepDeployment {
     return ($json | ConvertFrom-Json)
 }
 
-# Phase 1: deploy infra. If we are going to import images from a vendor ACR,
-# leave appImage/stage2Image at their bicep defaults (mcr quickstart) so the
-# container apps boot to a placeholder while we sync real images.
-$result = Invoke-BicepDeployment -Label 'phase1'
+# Phase 1: deploy infra. When importing, leave images at their placeholder and
+# keep Stage-2 OFF so the deploy never tries to pull tags the fresh ACR does not
+# have yet (and does not spin up a GPU node before the baked slm image exists).
+if ($doImport) {
+    $result = Invoke-BicepDeployment -Label 'phase1-infra' -Stage2ModeOverride 'none' -PlaceholderImages
+} else {
+    $result = Invoke-BicepDeployment -Label 'phase1'
+}
 $out = $result.properties.outputs
+$targetAcr = ($out.acrLoginServer.value -split '\.')[0]
 
-# ── Step 5b: import images from vendor ACR (if credentials provided) ────────
-if ($useVendorImport) {
-    $targetAcr = ($out.acrLoginServer.value -split '\.')[0]
-    Write-Host "`nSyncing images from vendor ACR ($VendorAcrFqdn) -> $targetAcr ..." -ForegroundColor Cyan
-    & (Join-Path $infraDir 'scripts\sync-images-from-vendor.ps1') `
-        -TargetAcrName $targetAcr `
-        -VendorAcrFqdn $VendorAcrFqdn `
-        -VendorAcrTokenName $VendorAcrTokenName `
-        -VendorAcrTokenPassword $VendorAcrTokenPassword `
-        -Tag $ImageTag `
-        -AllTags:$AllTags `
-        -EnableArtifactStreaming:$EnableArtifactStreaming `
-        -UseAad:$UseAad `
-        -Force
-    if ($LASTEXITCODE -ne 0) { throw "Image sync failed." }
+# ── Step 5b: import the selected images from the vendor ACR (server-side, AAD) ─
+if ($doImport) {
+    Write-Host "`nImporting ContentShield images from $VendorAcr -> $targetAcr ..." -ForegroundColor Cyan
+    Import-ContentShieldImage -TargetAcr $targetAcr -VendorAcr $VendorAcr -Repo 'contentshield' -Tag $AppImageTag
+    if ($Stage2Mode -in @('slm-gpu','both')) {
+        Import-ContentShieldImage -TargetAcr $targetAcr -VendorAcr $VendorAcr -Repo 'contentshield-stage2' -Tag $SlmGpuStage2ImageTag
+    }
+    if ($Stage2Mode -in @('aoai-cpu','both')) {
+        Import-ContentShieldImage -TargetAcr $targetAcr -VendorAcr $VendorAcr -Repo 'contentshield-stage2' -Tag $AoaiCpuStage2ImageTag
+    }
 
-    # Phase 2: roll container apps to the freshly imported images by tag.
-    # The bicep template builds the full image reference using the customer ACR
-    # login server, so we only need to pass the tag.
-    $result = Invoke-BicepDeployment -Label 'phase2-images' `
-        -AppImageTagOverride $ImageTag `
-        -Stage2ImageTagOverride $ImageTag
-    $out = $result.properties.outputs
+    # Phase 2: roll to the real Stage-2 mode + imported image tags.
+    if (-not $WhatIf) {
+        $result = Invoke-BicepDeployment -Label 'phase2-apps'
+        $out = $result.properties.outputs
+    }
+}
+
+# ── Step 5b2: grant the aoai-cpu Stage-2 MI access to Azure OpenAI ──────────
+# The wrapper uses DefaultAzureCredential when no API key is set, so its system
+# managed identity needs 'Cognitive Services OpenAI User' on the target account.
+# Works cross-resource-group (e.g. an AOAI/Foundry account in another RG).
+if (($Stage2Mode -in @('aoai-cpu','both')) -and $AzureOpenAiResourceId -and -not $AzureOpenAiApiKey -and -not $WhatIf) {
+    $aoaiMi = $out.stage2AoaiPrincipalId.value
+    if ($aoaiMi) {
+        Write-Host "`nGranting aoai Stage-2 MI 'Cognitive Services OpenAI User' on Azure OpenAI ..." -ForegroundColor Cyan
+        az role assignment create `
+            --assignee-object-id $aoaiMi `
+            --assignee-principal-type ServicePrincipal `
+            --role 'Cognitive Services OpenAI User' `
+            --scope $AzureOpenAiResourceId `
+            --only-show-errors 2>&1 | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  [warn] RBAC grant failed. Grant manually or pass -AzureOpenAiApiKey." -ForegroundColor Yellow
+            Write-Host "         scope=$AzureOpenAiResourceId principal=$aoaiMi" -ForegroundColor Yellow
+            $LASTEXITCODE = 0
+        } else {
+            Write-Host "  [OK] role granted." -ForegroundColor Green
+        }
+    }
 }
 
 # ── Step 5c: ensure ACR Artifact Streaming is enabled on both repos. ──────────
@@ -289,7 +358,10 @@ Write-Host "  NAT Gateway IP:        $($out.natGatewayPublicIp.value)"
 Write-Host "  ACR:                   $($out.acrLoginServer.value)"
 Write-Host "  Container Apps Env:    $($out.caeName.value) (domain: $($out.caeDefaultDomain.value))"
 Write-Host "  App FQDN:              $($out.appFqdn.value)"
-Write-Host "  Stage 2 FQDN:          $($out.stage2Fqdn.value)"
+Write-Host "  Stage-2 mode:          $($out.stage2Mode.value)"
+Write-Host "  Orchestrator routes -> $($out.orchestratorStage2TargetApp.value)"
+Write-Host "  Stage-2 SLM-GPU FQDN:  $($out.stage2SlmFqdn.value)"
+Write-Host "  Stage-2 AOAI-CPU FQDN: $($out.stage2AoaiFqdn.value)"
 Write-Host "  Content Safety:        $($out.contentSafetyEndpoint.value)"
 Write-Host "  APIM Gateway:          $($out.apimGatewayUrl.value)"
 Write-Host "  Storage Account:       $($out.storageAccountName.value)"
@@ -301,6 +373,7 @@ Write-Host "  Managed identity principalIds (system-assigned):" -ForegroundColor
 Write-Host "    ACR:           $($out.acrPrincipalId.value)" -ForegroundColor Gray
 Write-Host "    Content Safety:$($out.contentSafetyPrincipalId.value)" -ForegroundColor Gray
 Write-Host "    App:           $($out.appPrincipalId.value)" -ForegroundColor Gray
-Write-Host "    Stage 2:       $($out.stage2PrincipalId.value)" -ForegroundColor Gray
+Write-Host "    Stage2 SLM:    $($out.stage2SlmPrincipalId.value)" -ForegroundColor Gray
+Write-Host "    Stage2 AOAI:   $($out.stage2AoaiPrincipalId.value)" -ForegroundColor Gray
 Write-Host "    APIM:          $($out.apimPrincipalId.value)" -ForegroundColor Gray
 Write-Host ""
