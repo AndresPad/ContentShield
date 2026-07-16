@@ -107,6 +107,15 @@ Secrets must not be committed. In Azure, put `HF_TOKEN` in a Container Apps secr
 | `SLM_PATH` | Orchestrator / Stage2 client | Yes for `/classify` service | Set to `/classify` for `ca-contentshield-stage2`. |
 | `SLM_TIMEOUT_SECONDS` | Orchestrator / Stage2 client | No | Defaults to `15`. |
 | `SLM_MODEL` | Orchestrator / Stage2 chat fallback | No | Defaults to `google/gemma-4-31b-it`. |
+| `STAGE2_BACKEND` | Stage2 service | No | `vllm` for the `slm-gpu` image or `azure_openai` for the `aoai-cpu` image. Each image sets its own default. |
+| `AZURE_OPENAI_ENDPOINT` | Stage2 `aoai-cpu` | Yes | Azure OpenAI resource endpoint. |
+| `AZURE_OPENAI_DEPLOYMENT` | Stage2 `aoai-cpu` | No | Defaults to `gpt-4o`. |
+| `AZURE_OPENAI_API_VERSION` | Stage2 `aoai-cpu` | No | Defaults to `2024-10-21`. |
+| `AZURE_OPENAI_API_KEY` | Stage2 `aoai-cpu` | No | Leave blank for `DefaultAzureCredential`; otherwise inject through a Container Apps secret. |
+| `AZURE_OPENAI_BEARER_TOKEN` | Stage2 `aoai-cpu` | No | Short-lived local/dev evaluation fallback only. Do not use for production; prefer managed identity. |
+| `AZURE_OPENAI_TIMEOUT_S` | Stage2 `aoai-cpu` | No | Defaults to `3` seconds per attempt. |
+| `AZURE_OPENAI_MAX_RETRIES` | Stage2 `aoai-cpu` | No | Defaults to `1`; two bounded attempts plus SDK backoff remain within the orchestrator's Stage2 budget under normal retry conditions. |
+| `AZURE_OPENAI_TOP_LOGPROBS` | Stage2 `aoai-cpu` | No | Defaults to `10`. GPT-4o is constrained to `YES`/`NO`; both probabilities are normalized into the public score. |
 | `HF_TOKEN` | Stage2 service | Yes for gated Gemma pulls | Store as a secret in Azure. |
 | `MODEL_NAME` | Stage2 service | No | Defaults to `google/gemma-4-31b-it`. |
 | `MAX_MODEL_LEN` | Stage2 service | No | Defaults to `20000`, the validated single-A100 dev context window for this service. |
@@ -204,21 +213,16 @@ The deployment order is Stage2 first, then orchestrator. The orchestrator needs 
 
 ### Build Images
 
-The lock file is not used at runtime directly; it is baked into the orchestrator image during `uv sync --frozen`. It must be committed so a clean clone can build the same image.
+The lock files are not used directly at runtime; dependencies are installed into the images with `uv sync --frozen`. Commit both the root lock and `services/stage2/uv.lock` so clean clones reproduce the dependency graphs.
 
-```bash
-cd RatioAI.ContentShield
-
-az acr build \
-  --registry ratioaidev \
-  --image contentshield:v1 \
-  .
-
-az acr build \
-  --registry ratioaidev \
-  --image contentshield-stage2:v2 \
-  services/stage2
+```powershell
+Set-Location RatioAI.ContentShield
+az acr build --registry ratioaidev --image contentshield:v1 .
+# Build only the Azure OpenAI CPU variant for release 1.0.3.
+../infra/contentshield/scripts/publish-stage2-images.ps1 -VendorAcrName ratioai -Version 1.0.3 -Variant aoai-cpu
 ```
+
+This publishes `contentshield-stage2:1.0.3-aoai-cpu`. Omit `-Variant` only when both `1.0.3-aoai-cpu` and `1.0.3-slm-gpu` must be rebuilt.
 
 ### Deploy Stage2
 

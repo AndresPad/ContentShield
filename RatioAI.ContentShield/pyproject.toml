@@ -12,7 +12,11 @@ dependencies = [
   "sqlparse>=0.4.4",
   "azure-identity>=1.17.0",
   # aiohttp is required by azure.identity.aio for the async transport pipeline.
-  "aiohttp>=3.9.0",
+  # Floor raised to 3.14.0 to clear GHSA-hg6j-4rv6-33pg / GHSA-jg22-mg44-37j8.
+  "aiohttp>=3.14.0",
+  # urllib3 is transitive (requests -> azure-core). Pinned floor clears
+  # GHSA-mf9v-mfxr-j63j; keep this constraint until the transitive floor moves.
+  "urllib3>=2.7.0",
   "python-dotenv>=1.0.0",
   "joblib>=1.4.0",
   "numpy>=1.26.0",
